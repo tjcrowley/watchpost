@@ -148,9 +148,26 @@ async function connect(): Promise<void> {
 
     ws.on("message", async (data: Buffer) => {
       try {
-        // Protect sends binary update packets — try to parse as JSON first (some versions)
+        // Protect binary packet: 8-byte header + JSON body
+        if (data.length < 8) return;
+
         let packet: any;
-        try { packet = JSON.parse(data.toString()); } catch { return; } // binary packets need proper decoder
+        try {
+          // Skip 8-byte binary header, parse JSON from byte 8
+          packet = JSON.parse(data.slice(8).toString());
+        } catch {
+          try {
+            // Fallback: plain JSON (some firmware)
+            packet = JSON.parse(data.toString());
+          } catch {
+            return;
+          }
+        }
+
+        // Log non-nvr events for debugging
+        if (packet.modelKey !== "nvr") {
+          logger.info({ modelKey: packet.modelKey, action: packet.action, type: packet.payload?.type }, "Protect event");
+        }
 
         if (!packet || packet.modelKey !== "event" || packet.action !== "add") return;
         if (!packet.payload || packet.payload.type !== "smartDetectZone") return;
