@@ -81,6 +81,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:-changeme-generate-a-real-secret}
       FACE_SIDECAR_URL: ${FACE_SIDECAR_URL:-http://face-sidecar:5500}
       MATCH_THRESHOLD: ${MATCH_THRESHOLD:-0.4}
+      PROTECT_URL: ${PROTECT_URL:-}
+      PROTECT_USERNAME: ${PROTECT_USERNAME:-}
+      PROTECT_PASSWORD: ${PROTECT_PASSWORD:-}
       NODE_ENV: ${NODE_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       PORT: 3001
@@ -171,7 +174,7 @@ services:
     ports:
       - "5500:5500"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:5500/health || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5500/health')\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -191,7 +194,7 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/nginx-health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3

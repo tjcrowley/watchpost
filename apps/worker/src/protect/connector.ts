@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import https from "https";
+import zlib from "zlib";
 import Redis from "ioredis";
 import WebSocket from "ws";
 import { createLogger } from "@watchpost/logger";
@@ -56,6 +57,34 @@ async function apiRequest(opts: {
     );
     req.on("error", reject);
     if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+/** Fetch raw binary data (e.g. JPEG snapshots) from Protect API */
+async function apiRequestRaw(opts: {
+  path: string;
+  headers?: Record<string, string>;
+}): Promise<{ status: number; body: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: PROTECT_HOST,
+        port: 443,
+        path: opts.path,
+        method: "GET",
+        agent,
+        headers: opts.headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => { chunks.push(chunk); });
+        res.on("end", () => {
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks) });
+        });
+      }
+    );
+    req.on("error", reject);
     req.end();
   });
 }
@@ -155,23 +184,50 @@ async function connect(): Promise<void> {
     ws.on("message", async (data: Buffer) => {
       msgCount++;
       try {
-        // Protect binary packet: 8-byte header + JSON body
+        // ── Parse Protect binary WS packet ──
+        // Each frame: 8-byte header + payload
+        //   byte 0: packet type (1=action, 2=data)
+        //   byte 1: payload format (1=JSON, 2=UTF8, 3=binary)
+        //   byte 2: deflated (1=zlib compressed)
+        //   byte 3: reserved
+        //   bytes 4-7: payload length (big-endian uint32)
+        // A message may contain two frames: action (JSON) + data (binary snapshot)
         if (data.length < 8) return;
+
+        const actionPayloadLen = data.readUInt32BE(4);
+        const actionDeflated = data[2] === 1;
+
+        if (data.length < 8 + actionPayloadLen) return;
+
+        let actionBuf = data.slice(8, 8 + actionPayloadLen);
+        if (actionDeflated) {
+          try { actionBuf = zlib.inflateSync(actionBuf); } catch { return; }
+        }
 
         let packet: any;
         try {
-          packet = JSON.parse(data.slice(8).toString());
+          packet = JSON.parse(actionBuf.toString());
         } catch {
-          try {
-            packet = JSON.parse(data.toString());
-          } catch {
-            return;
+          return;
+        }
+
+        // Extract optional second frame (snapshot data)
+        let snapshotBuf: Buffer | null = null;
+        const dataOffset = 8 + actionPayloadLen;
+        if (data.length > dataOffset + 8) {
+          const dataPayloadLen = data.readUInt32BE(dataOffset + 4);
+          const dataDeflated = data[dataOffset + 2] === 1;
+          if (data.length >= dataOffset + 8 + dataPayloadLen) {
+            snapshotBuf = data.slice(dataOffset + 8, dataOffset + 8 + dataPayloadLen);
+            if (dataDeflated) {
+              try { snapshotBuf = zlib.inflateSync(snapshotBuf); } catch { snapshotBuf = null; }
+            }
           }
         }
 
         // Log every unique action+modelKey combo
         const sig = `${packet.action}:${packet.modelKey ?? "none"}`;
-        logger.info({ sig, action: packet.action, modelKey: packet.modelKey, topKeys: Object.keys(packet).join(",") }, "Protect packet");
+        logger.debug({ sig, action: packet.action, modelKey: packet.modelKey }, "Protect packet");
 
         if (!packet || packet.modelKey !== "event" || packet.action !== "add") return;
         if (!packet.payload) return;
@@ -183,7 +239,10 @@ async function connect(): Promise<void> {
         const isMotion = eventType === "motion";
         if (!isPersonDetect && !isMotion) return;
 
-        logger.info({ type: eventType, camera: packet.payload.camera, id: packet.payload.id }, "Detection event");
+        logger.info(
+          { type: eventType, camera: packet.payload.camera, id: packet.payload.id, hasSnapshot: !!snapshotBuf },
+          "Detection event"
+        );
 
         const camResult = await pool.query(
           "SELECT id FROM cameras WHERE protect_id = $1 AND site_id = $2",
@@ -195,13 +254,31 @@ async function connect(): Promise<void> {
           return;
         }
 
+        // If no inline snapshot, fetch one from the Protect API
+        let snapshotBase64: string | null = null;
+        if (snapshotBuf) {
+          snapshotBase64 = snapshotBuf.toString("base64");
+        } else {
+          try {
+            const snapRes = await apiRequestRaw({
+              path: `/proxy/protect/api/cameras/${packet.payload.camera}/snapshot?ts=${Date.now()}`,
+              headers: authHeaders,
+            });
+            if (snapRes.status === 200 && snapRes.body.length > 0) {
+              snapshotBase64 = snapRes.body.toString("base64");
+            }
+          } catch (err) {
+            logger.warn({ err, camera: packet.payload.camera }, "Failed to fetch snapshot");
+          }
+        }
+
         await queue.send("detection-pipeline", {
           site_id: siteId,
           camera_id: camResult.rows[0].id,
           protect_event_id: packet.payload.id,
           event_type: packet.payload.type,
           detected_at: new Date(packet.payload.start).toISOString(),
-          snapshot_base64: null,
+          snapshot_base64: snapshotBase64,
         });
       } catch (err) {
         logger.error(err, "Error handling Protect event");
