@@ -1,0 +1,25 @@
+{
+  "name": "@watchpost/worker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/protect/connector.ts",
+    "start": "node dist/protect/connector.js",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@watchpost/db": "workspace:*",
+    "@watchpost/logger": "workspace:*",
+    "@watchpost/types": "workspace:*",
+    "ioredis": "^5.4.0",
+    "minio": "^8.0.0",
+    "node-fetch": "^3.3.0",
+    "unifi-protect": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

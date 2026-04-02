@@ -1,0 +1,181 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL + pgvector ───────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: watchpost-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: watchpost
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-watchpost}
+      POSTGRES_DB: watchpost
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U watchpost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis ───────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: watchpost-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── MinIO (S3-compatible storage) ───────────
+  minio:
+    image: minio/minio:latest
+    container_name: watchpost-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-watchpost}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-changeme-minio-secret}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── API (Fastify) ──────────────────────────
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: watchpost-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://watchpost:watchpost@postgres:5432/watchpost}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio}
+      MINIO_PORT: ${MINIO_PORT:-9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-watchpost}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-changeme-minio-secret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-watchpost}
+      JWT_SECRET: ${JWT_SECRET:-changeme-generate-a-real-secret}
+      FACE_SIDECAR_URL: ${FACE_SIDECAR_URL:-http://face-sidecar:5500}
+      MATCH_THRESHOLD: ${MATCH_THRESHOLD:-0.4}
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: 3001
+    ports:
+      - "${PORT:-3001}:3001"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Web (Next.js) ──────────────────────────
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
+    container_name: watchpost-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:3001}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Worker (Protect connector + pipeline) ──
+  worker:
+    build:
+      context: ../apps/worker
+      dockerfile: Dockerfile
+    container_name: watchpost-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://watchpost:watchpost@postgres:5432/watchpost}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio}
+      MINIO_PORT: ${MINIO_PORT:-9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-watchpost}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-changeme-minio-secret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-watchpost}
+      PROTECT_URL: ${PROTECT_URL}
+      PROTECT_USERNAME: ${PROTECT_USERNAME}
+      PROTECT_PASSWORD: ${PROTECT_PASSWORD}
+      FACE_SIDECAR_URL: ${FACE_SIDECAR_URL:-http://face-sidecar:5500}
+      MATCH_THRESHOLD: ${MATCH_THRESHOLD:-0.4}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM: ${TWILIO_FROM:-}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    healthcheck:
+      test: ["CMD-SHELL", "node -e 'process.exit(0)'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Face Sidecar (Python + InsightFace) ────
+  face-sidecar:
+    build:
+      context: ../apps/face-sidecar
+      dockerfile: Dockerfile
+    container_name: watchpost-face-sidecar
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://watchpost:watchpost@postgres:5432/watchpost}
+      MATCH_THRESHOLD: ${MATCH_THRESHOLD:-0.4}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "5500:5500"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5500/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

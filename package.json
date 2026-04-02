@@ -1,0 +1,21 @@
+{
+  "name": "watchpost",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Intelligent venue security for UniFi Protect deployments",
+  "license": "MIT",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "db:migrate": "cd infra && cat migrations/*.sql | docker exec -i watchpost-postgres psql -U watchpost -d watchpost",
+    "docker:up": "docker compose -f infra/docker-compose.yml up -d",
+    "docker:down": "docker compose -f infra/docker-compose.yml down",
+    "docker:dev": "docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d"
+  }
+}

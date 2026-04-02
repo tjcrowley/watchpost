@@ -1,0 +1,30 @@
+{
+  "name": "@watchpost/api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/app.ts",
+    "start": "node dist/app.js",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.0",
+    "@fastify/jwt": "^9.0.0",
+    "@fastify/multipart": "^9.0.0",
+    "@fastify/websocket": "^11.0.0",
+    "@watchpost/db": "workspace:*",
+    "@watchpost/logger": "workspace:*",
+    "@watchpost/types": "workspace:*",
+    "bcrypt": "^5.1.1",
+    "fastify": "^5.2.0",
+    "ioredis": "^5.4.0",
+    "minio": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

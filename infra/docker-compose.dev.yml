@@ -1,0 +1,39 @@
+version: "3.9"
+
+# Development overrides — mount source code for hot reload
+services:
+  api:
+    build:
+      target: development
+    volumes:
+      - ../apps/api/src:/app/src
+    environment:
+      NODE_ENV: development
+      LOG_LEVEL: debug
+    command: npx tsx watch src/app.ts
+
+  web:
+    volumes:
+      - ../apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      NODE_ENV: development
+    command: pnpm dev
+
+  worker:
+    build:
+      target: development
+    volumes:
+      - ../apps/worker/src:/app/src
+    environment:
+      NODE_ENV: development
+      LOG_LEVEL: debug
+    command: npx tsx watch src/protect/connector.ts
+
+  face-sidecar:
+    volumes:
+      - ../apps/face-sidecar:/app
+    environment:
+      LOG_LEVEL: debug
+    command: uvicorn main:app --host 0.0.0.0 --port 5500 --reload
