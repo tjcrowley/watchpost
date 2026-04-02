@@ -7,6 +7,10 @@ COPY packages/ ./packages/
 COPY apps/worker/ ./apps/worker/
 RUN pnpm install --no-frozen-lockfile
 
+# Build workspace packages first so their dist/ is available
+RUN pnpm --filter @watchpost/types build
+RUN pnpm --filter @watchpost/logger build
+RUN pnpm --filter @watchpost/db build
 WORKDIR /app/apps/worker
 RUN pnpm build
 
