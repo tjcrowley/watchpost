@@ -7,8 +7,10 @@ import { processEvent } from "../pipeline/processor.js";
 
 const logger = createLogger("protect-connector");
 
-// v4 API: login() takes full URL
-const PROTECT_URL = process.env.PROTECT_URL ?? "https://192.168.1.1";
+// v4 API: login() takes the NVR hostname or IP (no scheme)
+const PROTECT_URL = (process.env.PROTECT_URL ?? "192.168.1.1")
+  .replace(/^https?:\/\//, "")
+  .replace(/\/$/, "");
 const PROTECT_USERNAME = process.env.PROTECT_USERNAME ?? "";
 const PROTECT_PASSWORD = process.env.PROTECT_PASSWORD ?? "";
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
