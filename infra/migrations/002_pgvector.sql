@@ -10,7 +10,7 @@ CREATE TABLE face_enrollments (
   created_at   TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX ON face_enrollments USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+CREATE INDEX ON face_enrollments USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE detection_events (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),

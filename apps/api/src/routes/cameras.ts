@@ -1,6 +1,13 @@
 import { type FastifyPluginAsync } from "fastify";
 import { query, queryOne } from "../db/client.js";
-import type { Camera, AuthUser } from "@watchpost/types";
+import type { Camera } from "@watchpost/types";
+
+interface JwtUser {
+  userId: string;
+  siteId: string;
+  role: string;
+  email: string;
+}
 
 export const camerasRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("onRequest", async (request) => {
@@ -9,11 +16,11 @@ export const camerasRoutes: FastifyPluginAsync = async (app) => {
 
   // GET /api/cameras
   app.get("/", async (request, reply) => {
-    const user = request.user as AuthUser;
+    const user = request.user as JwtUser;
 
     const cameras = await query<Camera>(
       "SELECT * FROM cameras WHERE site_id = $1 ORDER BY name",
-      [user.site_id]
+      [user.siteId]
     );
 
     return reply.send(cameras);
@@ -21,11 +28,11 @@ export const camerasRoutes: FastifyPluginAsync = async (app) => {
 
   // GET /api/cameras/:id
   app.get<{ Params: { id: string } }>("/:id", async (request, reply) => {
-    const user = request.user as AuthUser;
+    const user = request.user as JwtUser;
 
     const camera = await queryOne<Camera>(
       "SELECT * FROM cameras WHERE id = $1 AND site_id = $2",
-      [request.params.id, user.site_id]
+      [request.params.id, user.siteId]
     );
 
     if (!camera) {
@@ -40,7 +47,7 @@ export const camerasRoutes: FastifyPluginAsync = async (app) => {
     Params: { id: string };
     Body: { name?: string; enabled?: boolean; zone_config?: Record<string, unknown> };
   }>("/:id", async (request, reply) => {
-    const user = request.user as AuthUser;
+    const user = request.user as JwtUser;
 
     if (user.role !== "admin") {
       return reply.code(403).send({ error: "Admin role required" });
@@ -70,7 +77,7 @@ export const camerasRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(400).send({ error: "No fields to update" });
     }
 
-    values.push(id, user.site_id);
+    values.push(id, user.siteId);
     const camera = await queryOne<Camera>(
       `UPDATE cameras SET ${fields.join(", ")}
        WHERE id = $${paramIdx++} AND site_id = $${paramIdx}
@@ -85,7 +92,7 @@ export const camerasRoutes: FastifyPluginAsync = async (app) => {
     await query(
       `INSERT INTO audit_log (site_id, user_id, action, target, meta, ip)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [user.site_id, user.id, "camera.update", id, JSON.stringify(request.body), request.ip]
+      [user.siteId, user.userId, "camera.update", id, JSON.stringify(request.body), request.ip]
     );
 
     return reply.send(camera);
@@ -93,17 +100,16 @@ export const camerasRoutes: FastifyPluginAsync = async (app) => {
 
   // POST /api/cameras/sync — Trigger camera sync from Protect
   app.post("/sync", async (request, reply) => {
-    const user = request.user as AuthUser;
+    const user = request.user as JwtUser;
 
     if (user.role !== "admin") {
       return reply.code(403).send({ error: "Admin role required" });
     }
 
-    // In production, this triggers the worker to re-sync cameras from Protect
     await query(
       `INSERT INTO audit_log (site_id, user_id, action, ip)
        VALUES ($1, $2, $3, $4)`,
-      [user.site_id, user.id, "cameras.sync", request.ip]
+      [user.siteId, user.userId, "cameras.sync", request.ip]
     );
 
     return reply.send({ ok: true, message: "Camera sync initiated" });

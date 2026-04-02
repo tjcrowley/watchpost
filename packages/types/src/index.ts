@@ -150,7 +150,7 @@ export interface UpdateSubjectRequest {
 }
 
 export interface EnrollFaceRequest {
-  image: Buffer;
+  image: Uint8Array;
 }
 
 export interface EnrollFaceResponse {

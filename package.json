@@ -17,5 +17,8 @@
     "docker:up": "docker compose -f infra/docker-compose.yml up -d",
     "docker:down": "docker compose -f infra/docker-compose.yml down",
     "docker:dev": "docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d"
+  },
+  "dependencies": {
+    "unifi-protect": "^4.28.0"
   }
 }

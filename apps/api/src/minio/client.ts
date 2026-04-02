@@ -7,9 +7,11 @@ let client: S3Client | null = null;
 
 function getClient(): S3Client {
   if (!client) {
-    const endpoint = process.env.MINIO_ENDPOINT ?? "http://localhost:9000";
+    const host = process.env.MINIO_ENDPOINT ?? "localhost";
+    const port = process.env.MINIO_PORT ?? "9000";
+    const endpoint = host.startsWith("http") ? host : `http://${host}:${port}`;
     client = new S3Client({
-      endpoint: endpoint.startsWith("http") ? endpoint : `http://${endpoint}`,
+      endpoint,
       region: "us-east-1",
       forcePathStyle: true,
       credentials: {

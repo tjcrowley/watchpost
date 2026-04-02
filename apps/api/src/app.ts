@@ -58,8 +58,9 @@ export async function buildApp(): Promise<FastifyInstance> {
 
 export async function main(): Promise<void> {
   const app = await buildApp();
-  await app.listen({ port: 4000, host: "0.0.0.0" });
-  app.log.info("WatchPost API listening on :4000");
+  const port = parseInt(process.env.PORT ?? "3001", 10);
+  await app.listen({ port, host: "0.0.0.0" });
+  app.log.info(`WatchPost API listening on :${port}`);
 }
 
 main().catch((err) => {

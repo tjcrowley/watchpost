@@ -1,11 +1,12 @@
 -- 001_initial.sql — Core tables for WatchPost
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TABLE sites (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name        TEXT NOT NULL,
-  protect_url TEXT NOT NULL,
-  protect_key TEXT NOT NULL,
+  protect_url TEXT NOT NULL DEFAULT '',
+  protect_key TEXT NOT NULL DEFAULT '',
   timezone    TEXT DEFAULT 'UTC',
   created_at  TIMESTAMPTZ DEFAULT now()
 );

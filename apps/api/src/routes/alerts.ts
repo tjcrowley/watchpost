@@ -1,6 +1,13 @@
 import { type FastifyPluginAsync } from "fastify";
 import { query, queryOne } from "../db/client.js";
-import type { Alert, PaginatedResponse, AuthUser } from "@watchpost/types";
+import type { Alert, PaginatedResponse } from "@watchpost/types";
+
+interface JwtUser {
+  userId: string;
+  siteId: string;
+  role: string;
+  email: string;
+}
 
 export const alertsRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("onRequest", async (request) => {
@@ -11,15 +18,13 @@ export const alertsRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Querystring: { page?: string; limit?: string; status?: string } }>(
     "/",
     async (request, reply) => {
-      const user = request.user as AuthUser;
+      const user = request.user as JwtUser;
       const page = Math.max(1, parseInt(request.query.page ?? "1", 10));
       const limit = Math.min(100, Math.max(1, parseInt(request.query.limit ?? "25", 10)));
       const offset = (page - 1) * limit;
 
-      const conditions: string[] = [
-        "e.site_id = $1",
-      ];
-      const params: unknown[] = [user.site_id];
+      const conditions: string[] = ["e.site_id = $1"];
+      const params: unknown[] = [user.siteId];
 
       if (request.query.status) {
         params.push(request.query.status);
@@ -61,13 +66,13 @@ export const alertsRoutes: FastifyPluginAsync = async (app) => {
 
   // GET /api/alerts/:id
   app.get<{ Params: { id: string } }>("/:id", async (request, reply) => {
-    const user = request.user as AuthUser;
+    const user = request.user as JwtUser;
 
     const alert = await queryOne<Alert>(
       `SELECT a.* FROM alerts a
        JOIN detection_events e ON a.detection_event_id = e.id
        WHERE a.id = $1 AND e.site_id = $2`,
-      [request.params.id, user.site_id]
+      [request.params.id, user.siteId]
     );
 
     if (!alert) {

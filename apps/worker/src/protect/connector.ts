@@ -1,4 +1,5 @@
 import { ProtectApi } from "unifi-protect";
+import { ProtectApiUpdates, type ProtectNvrUpdatePayloadEventAdd } from "unifi-protect";
 import Redis from "ioredis";
 import { createLogger } from "@watchpost/logger";
 import { getPool, getQueue } from "@watchpost/db";
@@ -21,18 +22,11 @@ async function getSiteId(): Promise<string> {
   if (result.rows.length === 0) {
     throw new Error("No site configured. Create a site first.");
   }
-  return result.rows[0].id;
+  return result.rows[0].id as string;
 }
 
-async function syncCameras(siteId: string): Promise<void> {
-  if (!protect) return;
-
-  const bootstrapped = await protect.bootstrapController();
-  if (!bootstrapped) {
-    throw new Error("Failed to bootstrap Protect controller");
-  }
-
-  const cameras = protect.bootstrap?.cameras ?? [];
+async function syncCameras(api: ProtectApi, siteId: string): Promise<void> {
+  const cameras = api.cameras ?? [];
   logger.info({ cameras: cameras.length }, "Protect bootstrap loaded");
 
   const pool = getPool();
@@ -47,23 +41,43 @@ async function syncCameras(siteId: string): Promise<void> {
   logger.info({ synced: cameras.length }, "Cameras synced");
 }
 
-async function subscribeToEvents(siteId: string): Promise<void> {
-  if (!protect) return;
+async function connect(): Promise<void> {
+  logger.info({ url: PROTECT_URL }, "Connecting to UniFi Protect...");
+
+  // v3 API: constructor handles login
+  protect = new ProtectApi(PROTECT_URL, PROTECT_USERNAME, PROTECT_PASSWORD);
+
+  // Bootstrap / authenticate
+  const ok = await protect.refreshDevices();
+  if (!ok) {
+    throw new Error("Failed to authenticate with UniFi Protect");
+  }
+  logger.info("Authenticated with UniFi Protect");
+
+  redis = new Redis(REDIS_URL);
+  const siteId = await getSiteId();
+  await syncCameras(protect, siteId);
+
+  // Attach to the events WebSocket
+  const ws = protect.eventsWs;
+  if (!ws) {
+    throw new Error("Protect events WebSocket not available after bootstrap");
+  }
 
   const pool = getPool();
   const queue = await getQueue();
 
-  protect.on("message", async (event: any) => {
+  ws.on("message", async (data: Buffer) => {
     try {
-      if (event.header?.modelKey !== "event") return;
+      const packet = ProtectApiUpdates.decodeUpdatePacket(protect!.log, data);
+      if (!packet) return;
 
-      const payload = event.payload;
-      if (!payload) return;
+      const action = packet.action;
+      if (action.modelKey !== "event" || action.action !== "add") return;
 
-      // Only process smartDetectZone events (person detection)
-      if (payload.type !== "smartDetectZone") return;
+      const payload = packet.payload as ProtectNvrUpdatePayloadEventAdd;
+      if (!payload || payload.type !== "smartDetectZone") return;
 
-      // Check for person in smart detect types
       const smartTypes: string[] = payload.smartDetectTypes ?? [];
       if (!smartTypes.includes("person")) return;
 
@@ -83,15 +97,6 @@ async function subscribeToEvents(siteId: string): Promise<void> {
         return;
       }
 
-      // Fetch snapshot JPEG from Protect API
-      let snapshot: Buffer | null = null;
-      try {
-        snapshot = await protect!.getSnapshot(payload.camera);
-        logger.debug({ camera: payload.camera, bytes: snapshot?.length }, "Snapshot fetched");
-      } catch (err) {
-        logger.error(err, "Failed to fetch snapshot");
-      }
-
       // Enqueue for processing via pg-boss
       await queue.send("detection-pipeline", {
         site_id: siteId,
@@ -99,39 +104,26 @@ async function subscribeToEvents(siteId: string): Promise<void> {
         protect_event_id: payload.id,
         event_type: payload.type,
         detected_at: new Date(payload.start).toISOString(),
-        snapshot_base64: snapshot ? snapshot.toString("base64") : null,
+        snapshot_base64: null, // v3 API snapshot fetch handled in processor
       });
     } catch (err) {
       logger.error(err, "Error handling Protect event");
     }
   });
 
-  logger.info("Subscribed to Protect smartDetectZone events");
-}
+  logger.info("Subscribed to Protect events WebSocket");
 
-async function connect(): Promise<void> {
-  logger.info({ url: PROTECT_URL }, "Connecting to UniFi Protect...");
-
-  protect = new ProtectApi();
-  const loginSuccess = await protect.login(PROTECT_URL, PROTECT_USERNAME, PROTECT_PASSWORD);
-
-  if (!loginSuccess) {
-    throw new Error("Failed to authenticate with UniFi Protect");
-  }
-
-  logger.info("Authenticated with UniFi Protect");
-  redis = new Redis(REDIS_URL);
-
-  const siteId = await getSiteId();
-  await syncCameras(siteId);
-  await subscribeToEvents(siteId);
-
-  // Start the events websocket stream
-  const wsStarted = await protect.launchEventsWs();
-  if (!wsStarted) {
-    throw new Error("Failed to start Protect events websocket");
-  }
-  logger.info("Protect events websocket started");
+  // Wait until WS closes (disconnect)
+  await new Promise<void>((resolve) => {
+    ws.on("close", () => {
+      logger.warn("Protect WebSocket disconnected");
+      resolve();
+    });
+    ws.on("error", (err: Error) => {
+      logger.error(err, "Protect WebSocket error");
+      resolve();
+    });
+  });
 }
 
 async function connectWithBackoff(): Promise<void> {
@@ -142,18 +134,7 @@ async function connectWithBackoff(): Promise<void> {
   while (!shutdownRequested) {
     try {
       await connect();
-      attempt = 0; // reset on successful connection
-      logger.info("Protect connection established");
-
-      // Monitor for disconnects — the ProtectApi emits 'close' on WS disconnect
-      await new Promise<void>((resolve) => {
-        if (!protect) return resolve();
-        protect.on("close" as any, () => {
-          logger.warn("Protect WebSocket disconnected");
-          resolve();
-        });
-      });
-
+      attempt = 0;
       if (shutdownRequested) return;
       logger.info("Reconnecting after disconnect...");
     } catch (err) {
@@ -165,15 +146,7 @@ async function connectWithBackoff(): Promise<void> {
       );
       await new Promise((r) => setTimeout(r, delay));
     } finally {
-      // Clean up before reconnect
-      if (protect) {
-        try {
-          protect.removeAllListeners();
-        } catch {
-          // ignore cleanup errors
-        }
-        protect = null;
-      }
+      protect = null;
     }
   }
 }
@@ -181,14 +154,25 @@ async function connectWithBackoff(): Promise<void> {
 async function startPipelineWorker(): Promise<void> {
   const queue = await getQueue();
 
-  await queue.work("detection-pipeline", async (job: any) => {
-    const { snapshot_base64, ...eventData } = job.data;
-    const snapshot = snapshot_base64 ? Buffer.from(snapshot_base64, "base64") : null;
+  await queue.work("detection-pipeline", async (jobs) => {
+    for (const job of jobs) {
+      const data = job.data as Record<string, unknown>;
+      const { snapshot_base64, ...eventData } = data;
+      const snapshot = snapshot_base64
+        ? Buffer.from(snapshot_base64 as string, "base64")
+        : null;
 
-    await processEvent({
-      ...eventData,
-      snapshot,
-    });
+      await processEvent({
+        ...(eventData as {
+          site_id: string;
+          camera_id: string;
+          protect_event_id: string;
+          event_type: string;
+          detected_at: string;
+        }),
+        snapshot,
+      });
+    }
   });
 
   logger.info("Pipeline worker started");
@@ -197,11 +181,8 @@ async function startPipelineWorker(): Promise<void> {
 export async function startConnector(): Promise<void> {
   logger.info("WatchPost Worker starting...");
 
-  // Start pipeline worker first so it's ready to process events
   await startPipelineWorker();
 
-  // Connect to Protect with automatic reconnection
-  // This runs in background — don't await it since it loops forever
   connectWithBackoff().catch((err) => {
     logger.error(err, "Fatal connector error");
     process.exit(1);
@@ -214,16 +195,11 @@ export async function startConnector(): Promise<void> {
       logger.info(`Received ${signal}, shutting down...`);
       shutdownRequested = true;
       if (redis) await redis.quit();
-      if (protect) {
-        protect.removeAllListeners();
-        protect = null;
-      }
       process.exit(0);
     });
   }
 }
 
-// Auto-start when run directly
 startConnector().catch((err) => {
   logger.error(err, "Worker failed to start");
   process.exit(1);
