@@ -1,76 +1,79 @@
 """Face matching against enrolled embeddings in pgvector."""
 
 import os
-from dataclasses import dataclass
+import uuid
 
 import psycopg2
-from pgvector.psycopg2 import register_vector
-
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql://watchpost:watchpost@postgres:5432/watchpost",
 )
-MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.4"))
 
 
-@dataclass
-class MatchResult:
-    subject_id: str
-    display_name: str
-    list_type: str
-    distance: float
-    confidence: float
+def _get_conn() -> psycopg2.extensions.connection:
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = True
+    return conn
 
 
-class FaceMatcher:
-    """Queries pgvector for nearest-neighbor face matches."""
-
-    def __init__(self) -> None:
-        self._conn: psycopg2.extensions.connection | None = None
-
-    def _get_conn(self) -> psycopg2.extensions.connection:
-        if self._conn is None or self._conn.closed:
-            self._conn = psycopg2.connect(DATABASE_URL)
-            register_vector(self._conn)
-        return self._conn
-
-    def find_match(
-        self,
-        embedding: list[float],
-        site_id: str,
-        threshold: float | None = None,
-    ) -> MatchResult | None:
-        """Find the closest enrolled face within the distance threshold."""
-        threshold = threshold or MATCH_THRESHOLD
-        conn = self._get_conn()
-
+def find_match(
+    embedding: list[float],
+    site_id: str,
+    threshold: float = 0.4,
+) -> dict | None:
+    """Find the closest enrolled face within the distance threshold."""
+    conn = _get_conn()
+    try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT fe.subject_id, s.display_name, s.list_type,
-                       fe.embedding <=> %s::vector AS distance
+                SELECT fe.id, fe.subject_id, s.display_name, s.list_type,
+                       (fe.embedding <=> %s::vector) as distance
                 FROM face_enrollments fe
-                JOIN subjects s ON fe.subject_id = s.id
+                JOIN subjects s ON s.id = fe.subject_id
                 WHERE s.site_id = %s AND s.active = true
-                ORDER BY fe.embedding <=> %s::vector
+                ORDER BY distance
                 LIMIT 1
                 """,
-                (embedding, site_id, embedding),
+                (str(embedding), site_id),
             )
             row = cur.fetchone()
+    finally:
+        conn.close()
 
-        if row is None or row[3] > threshold:
-            return None
+    if row is None or row[4] > threshold:
+        return None
 
-        return MatchResult(
-            subject_id=row[0],
-            display_name=row[1],
-            list_type=row[2],
-            distance=row[3],
-            confidence=1 - row[3],
-        )
+    return {
+        "subject_id": row[1],
+        "display_name": row[2],
+        "list_type": row[3],
+        "distance": float(row[4]),
+        "confidence": 1.0 - float(row[4]),
+    }
 
-    def close(self) -> None:
-        if self._conn and not self._conn.closed:
-            self._conn.close()
+
+def store_embedding(
+    subject_id: str,
+    embedding: list[float],
+    source_path: str = None,
+    quality: float = None,
+) -> str:
+    """Insert a new face enrollment and return its id."""
+    enrollment_id = str(uuid.uuid4())
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO face_enrollments (id, subject_id, embedding, source_path, quality)
+                VALUES (%s, %s, %s::vector, %s, %s)
+                RETURNING id
+                """,
+                (enrollment_id, subject_id, str(embedding), source_path, quality),
+            )
+            result = cur.fetchone()
+            return result[0]
+    finally:
+        conn.close()
