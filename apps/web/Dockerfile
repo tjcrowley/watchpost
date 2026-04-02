@@ -4,7 +4,7 @@ WORKDIR /app
 
 FROM base AS deps
 COPY package.json ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules

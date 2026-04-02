@@ -10,7 +10,7 @@ CMD ["npx", "tsx", "watch", "src/app.ts"]
 
 FROM base AS build
 COPY package.json ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 COPY . .
 RUN pnpm build
 
