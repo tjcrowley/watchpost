@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires */
 import Redis from "ioredis";
 import { createLogger } from "@watchpost/logger";
 import { getPool, getQueue } from "@watchpost/db";
@@ -6,7 +6,6 @@ import { processEvent } from "../pipeline/processor.js";
 
 const logger = createLogger("protect-connector");
 
-// v4 API: login() takes hostname/IP (no scheme)
 const PROTECT_HOST = (process.env.PROTECT_URL ?? "192.168.1.1")
   .replace(/^https?:\/\//, "")
   .replace(/\/$/, "");
@@ -42,15 +41,18 @@ async function syncCameras(api: any, siteId: string): Promise<void> {
 async function connect(): Promise<void> {
   logger.info({ host: PROTECT_HOST }, "Connecting to UniFi Protect...");
 
-  // Dynamic import because unifi-protect v4 is ESM-only
-  const up = await import("unifi-protect");
+  // unifi-protect v4 is ESM — use createRequire to load it
+  const { createRequire } = require("module");
+  const req = createRequire(__filename);
+  const up = req("unifi-protect");
+
   const protect: any = new up.ProtectApi();
 
-  const loginOk = await protect.login(PROTECT_HOST, PROTECT_USERNAME, PROTECT_PASSWORD);
+  const loginOk: boolean = await protect.login(PROTECT_HOST, PROTECT_USERNAME, PROTECT_PASSWORD);
   if (!loginOk) throw new Error("Failed to authenticate with UniFi Protect");
   logger.info("Authenticated with UniFi Protect");
 
-  const bootstrapOk = await protect.getBootstrap();
+  const bootstrapOk: boolean = await protect.getBootstrap();
   if (!bootstrapOk) throw new Error("Failed to bootstrap Protect controller");
   logger.info("Bootstrap complete");
 
@@ -58,28 +60,29 @@ async function connect(): Promise<void> {
   const siteId = await getSiteId();
   await syncCameras(protect, siteId);
 
-  // launchEventsWs is private in types but exists at runtime
-  const wsOk = await protect.launchEventsWs();
+  const wsOk: boolean = await protect.launchEventsWs();
   if (!wsOk) throw new Error("Failed to launch Protect events WebSocket");
   logger.info("Events WebSocket started");
 
-  // _eventsWs is the internal WebSocket
-  const ws = protect._eventsWs;
+  const ws: any = protect._eventsWs;
   if (!ws) throw new Error("_eventsWs is null after launchEventsWs");
 
   const pool = getPool();
   const queue = await getQueue();
 
+  const ProtectApiUpdates = up.ProtectApiUpdates;
+
   ws.on("message", async (data: Buffer) => {
     try {
-      const { ProtectApiUpdates } = await import("unifi-protect");
-      const packet = ProtectApiUpdates.decodeUpdatePacket(protect.log, data);
+      const packet: any = ProtectApiUpdates?.decodeUpdatePacket
+        ? ProtectApiUpdates.decodeUpdatePacket(protect.log, data)
+        : null;
       if (!packet) return;
 
-      const action = packet.action as any;
-      if (action.modelKey !== "event" || action.action !== "add") return;
+      const action = packet.action;
+      if (action?.modelKey !== "event" || action?.action !== "add") return;
 
-      const payload = packet.payload as any;
+      const payload = packet.payload;
       if (!payload || payload.type !== "smartDetectZone") return;
 
       const smartTypes: string[] = payload.smartDetectTypes ?? [];
