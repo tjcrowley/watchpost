@@ -1,6 +1,8 @@
 "use client";
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+// Use relative URL so requests go through nginx (same host/port as the web app)
+// Falls back to absolute URL only if explicitly set (e.g. for local dev)
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;

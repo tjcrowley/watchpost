@@ -8,11 +8,7 @@ export default function HomePage() {
 
   useEffect(() => {
     const token = localStorage.getItem("watchpost_token");
-    if (token) {
-      router.replace("/watchlist");
-    } else {
-      router.replace("/login");
-    }
+    router.replace(token ? "/watchlist" : "/login");
   }, [router]);
 
   return (
