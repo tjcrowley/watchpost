@@ -59,8 +59,8 @@ services:
   # ── API (Fastify) ──────────────────────────
   api:
     build:
-      context: ../apps/api
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: apps/api/Dockerfile
     container_name: watchpost-api
     restart: unless-stopped
     depends_on:
@@ -95,8 +95,8 @@ services:
   # ── Web (Next.js) ──────────────────────────
   web:
     build:
-      context: ../apps/web
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: apps/web/Dockerfile
     container_name: watchpost-web
     restart: unless-stopped
     depends_on:
@@ -116,8 +116,8 @@ services:
   # ── Worker (Protect connector + pipeline) ──
   worker:
     build:
-      context: ../apps/worker
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: apps/worker/Dockerfile
     container_name: watchpost-worker
     restart: unless-stopped
     depends_on:
@@ -156,8 +156,8 @@ services:
   # ── Face Sidecar (Python + InsightFace) ────
   face-sidecar:
     build:
-      context: ../apps/face-sidecar
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: apps/face-sidecar/Dockerfile
     container_name: watchpost-face-sidecar
     restart: unless-stopped
     depends_on:
