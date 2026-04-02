@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import https from "https";
 import Redis from "ioredis";
+import WebSocket from "ws";
 import { createLogger } from "@watchpost/logger";
 import { getPool, getQueue } from "@watchpost/db";
 import { processEvent } from "../pipeline/processor.js";
@@ -13,8 +15,85 @@ const PROTECT_USERNAME = process.env.PROTECT_USERNAME ?? "";
 const PROTECT_PASSWORD = process.env.PROTECT_PASSWORD ?? "";
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 
-let redis: Redis | null = null;
-let shutdownRequested = false;
+const agent = new https.Agent({ rejectUnauthorized: false });
+
+async function apiRequest(opts: {
+  method: string;
+  path: string;
+  body?: object;
+  headers?: Record<string, string>;
+}): Promise<{ status: number; body: any; headers: Record<string, string> }> {
+  return new Promise((resolve, reject) => {
+    const payload = opts.body ? JSON.stringify(opts.body) : undefined;
+    const req = https.request(
+      {
+        hostname: PROTECT_HOST,
+        port: 443,
+        path: opts.path,
+        method: opts.method,
+        agent,
+        headers: {
+          "Content-Type": "application/json",
+          ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+          ...opts.headers,
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => { data += chunk; });
+        res.on("end", () => {
+          const headers: Record<string, string> = {};
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (v) headers[k.toLowerCase()] = Array.isArray(v) ? v[0] : v;
+          }
+          try {
+            resolve({ status: res.statusCode ?? 0, body: JSON.parse(data), headers });
+          } catch {
+            resolve({ status: res.statusCode ?? 0, body: data, headers });
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function login(): Promise<{ cookie: string; csrfToken: string }> {
+  const res = await apiRequest({
+    method: "POST",
+    path: "/api/auth/login",
+    body: { username: PROTECT_USERNAME, password: PROTECT_PASSWORD, rememberMe: true, token: "" },
+  });
+
+  if (res.status !== 200) {
+    throw new Error(`Login failed: HTTP ${res.status} — ${JSON.stringify(res.body)}`);
+  }
+
+  const cookie = res.headers["set-cookie"]?.split(";")[0];
+  const csrfToken = res.headers["x-updated-csrf-token"] ?? res.headers["x-csrf-token"];
+
+  if (!cookie || !csrfToken) {
+    throw new Error(`Login succeeded but missing cookie or CSRF token. Headers: ${JSON.stringify(res.headers)}`);
+  }
+
+  return { cookie, csrfToken };
+}
+
+async function getBootstrap(authHeaders: Record<string, string>): Promise<any> {
+  const res = await apiRequest({
+    method: "GET",
+    path: "/proxy/protect/api/bootstrap",
+    headers: authHeaders,
+  });
+
+  if (res.status !== 200) {
+    throw new Error(`Bootstrap failed: HTTP ${res.status}`);
+  }
+
+  return res.body;
+}
 
 async function getSiteId(): Promise<string> {
   const pool = getPool();
@@ -23,8 +102,7 @@ async function getSiteId(): Promise<string> {
   return result.rows[0].id as string;
 }
 
-async function syncCameras(api: any, siteId: string): Promise<void> {
-  const cameras: any[] = api.cameras ?? [];
+async function syncCameras(cameras: any[], siteId: string): Promise<void> {
   logger.info({ cameras: cameras.length }, "Syncing cameras");
   const pool = getPool();
   for (const cam of cameras) {
@@ -41,80 +119,72 @@ async function syncCameras(api: any, siteId: string): Promise<void> {
 async function connect(): Promise<void> {
   logger.info({ host: PROTECT_HOST }, "Connecting to UniFi Protect...");
 
-  // unifi-protect v3 — CommonJS, use require
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { ProtectApi } = require("unifi-protect");
-  const protect: any = new ProtectApi(PROTECT_HOST, PROTECT_USERNAME, PROTECT_PASSWORD);
+  const { cookie, csrfToken } = await login();
+  logger.info("Authenticated with UniFi Protect");
 
-  // v3: refreshDevices() logs in + fetches bootstrap
-  const ok: boolean = await protect.refreshDevices();
-  if (!ok) throw new Error("Failed to connect to UniFi Protect");
-  logger.info("Connected to UniFi Protect");
+  const authHeaders = { Cookie: cookie, "X-CSRF-Token": csrfToken };
 
-  redis = new Redis(REDIS_URL);
+  const bootstrap = await getBootstrap(authHeaders);
+  logger.info({ cameras: bootstrap.cameras?.length ?? 0 }, "Bootstrap complete");
+
   const siteId = await getSiteId();
-  await syncCameras(protect, siteId);
+  await syncCameras(bootstrap.cameras ?? [], siteId);
 
-  // v3: eventsWs is the live WebSocket
-  const ws: any = protect.eventsWs;
-  if (!ws) throw new Error("eventsWs is null — no WebSocket available");
-  logger.info("Subscribed to Protect events");
+  // Connect to events WebSocket
+  const wsUrl = `wss://${PROTECT_HOST}/proxy/protect/ws/updates?lastUpdateId=${bootstrap.lastUpdateId ?? ""}`;
+  const ws = new WebSocket(wsUrl, {
+    headers: { Cookie: cookie, "X-CSRF-Token": csrfToken },
+    agent,
+  });
+
+  logger.info("Connecting to Protect events WebSocket...");
 
   const pool = getPool();
   const queue = await getQueue();
+  const redis = new Redis(REDIS_URL);
 
-  ws.on("message", async (data: Buffer) => {
-    try {
-      // v3: use protect's built-in packet decoder
-      const packet: any = protect.decodeEventPacket?.(data) ?? protect.decodeUpdatePacket?.(data);
-      if (!packet) return;
+  await new Promise<void>((resolve, reject) => {
+    ws.on("open", () => { logger.info("Events WebSocket connected"); });
 
-      const action = packet.action;
-      if (action?.modelKey !== "event" || action?.action !== "add") return;
-
-      const payload = packet.payload;
-      if (!payload || payload.type !== "smartDetectZone") return;
-
-      const smartTypes: string[] = payload.smartDetectTypes ?? [];
-      if (!smartTypes.includes("person")) return;
-
-      logger.info({ type: payload.type, camera: payload.camera, id: payload.id }, "Person detection");
-
-      const camResult = await pool.query(
-        "SELECT id FROM cameras WHERE protect_id = $1 AND site_id = $2",
-        [payload.camera, siteId]
-      );
-
-      if (camResult.rows.length === 0) {
-        logger.warn({ camera: payload.camera }, "Unknown camera, skipping");
-        return;
-      }
-
-      let snapshotBase64: string | null = null;
+    ws.on("message", async (data: Buffer) => {
       try {
-        // v3 snapshot: fetch directly via protect's HTTP client
-        const snap = await protect.getSnapshot?.(payload.camera);
-        if (snap) snapshotBase64 = (snap as Buffer).toString("base64");
+        // Protect sends binary update packets — try to parse as JSON first (some versions)
+        let packet: any;
+        try { packet = JSON.parse(data.toString()); } catch { return; } // binary packets need proper decoder
+
+        if (!packet || packet.modelKey !== "event" || packet.action !== "add") return;
+        if (!packet.payload || packet.payload.type !== "smartDetectZone") return;
+
+        const smartTypes: string[] = packet.payload.smartDetectTypes ?? [];
+        if (!smartTypes.includes("person")) return;
+
+        logger.info({ camera: packet.payload.camera, id: packet.payload.id }, "Person detection");
+
+        const camResult = await pool.query(
+          "SELECT id FROM cameras WHERE protect_id = $1 AND site_id = $2",
+          [packet.payload.camera, siteId]
+        );
+
+        if (camResult.rows.length === 0) {
+          logger.warn({ camera: packet.payload.camera }, "Unknown camera, skipping");
+          return;
+        }
+
+        await queue.send("detection-pipeline", {
+          site_id: siteId,
+          camera_id: camResult.rows[0].id,
+          protect_event_id: packet.payload.id,
+          event_type: packet.payload.type,
+          detected_at: new Date(packet.payload.start).toISOString(),
+          snapshot_base64: null,
+        });
       } catch (err) {
-        logger.warn(err, "Snapshot fetch failed");
+        logger.error(err, "Error handling Protect event");
       }
+    });
 
-      await queue.send("detection-pipeline", {
-        site_id: siteId,
-        camera_id: camResult.rows[0].id,
-        protect_event_id: payload.id,
-        event_type: payload.type,
-        detected_at: new Date(payload.start).toISOString(),
-        snapshot_base64: snapshotBase64,
-      });
-    } catch (err) {
-      logger.error(err, "Error handling Protect event");
-    }
-  });
-
-  await new Promise<void>((resolve) => {
-    ws.on("close", () => { logger.warn("WebSocket disconnected"); resolve(); });
-    ws.on("error", (err: Error) => { logger.error(err, "WebSocket error"); resolve(); });
+    ws.on("close", () => { logger.warn("WebSocket disconnected"); redis.quit(); resolve(); });
+    ws.on("error", (err) => { logger.error(err, "WebSocket error"); redis.quit(); reject(err); });
   });
 }
 
@@ -122,6 +192,10 @@ async function connectWithBackoff(): Promise<void> {
   let attempt = 0;
   const MAX_DELAY_MS = 30_000;
   const BASE_DELAY_MS = 1_000;
+  let shutdownRequested = false;
+
+  process.on("SIGINT", () => { shutdownRequested = true; process.exit(0); });
+  process.on("SIGTERM", () => { shutdownRequested = true; process.exit(0); });
 
   while (!shutdownRequested) {
     try {
@@ -140,7 +214,6 @@ async function connectWithBackoff(): Promise<void> {
 
 async function startPipelineWorker(): Promise<void> {
   const queue = await getQueue();
-
   await queue.work("detection-pipeline", async (jobs: any[]) => {
     for (const job of jobs) {
       const data = job.data as Record<string, unknown>;
@@ -148,7 +221,6 @@ async function startPipelineWorker(): Promise<void> {
       const snapshot = snapshot_base64
         ? Buffer.from(snapshot_base64 as string, "base64")
         : null;
-
       await processEvent({
         ...(eventData as {
           site_id: string;
@@ -161,30 +233,14 @@ async function startPipelineWorker(): Promise<void> {
       });
     }
   });
-
   logger.info("Pipeline worker started");
 }
 
-export async function startConnector(): Promise<void> {
+async function startConnector(): Promise<void> {
   logger.info("WatchPost Worker starting...");
   await new Promise((r) => setTimeout(r, 3000));
-
   await startPipelineWorker();
-
-  connectWithBackoff().catch((err: unknown) => {
-    logger.error(err, "Fatal connector error");
-    process.exit(1);
-  });
-
-  const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
-  for (const signal of signals) {
-    process.on(signal, async () => {
-      logger.info(`Received ${signal}, shutting down...`);
-      shutdownRequested = true;
-      if (redis) await redis.quit();
-      process.exit(0);
-    });
-  }
+  await connectWithBackoff();
 }
 
 startConnector().catch((err: unknown) => {
