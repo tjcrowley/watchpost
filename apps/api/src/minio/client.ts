@@ -1,46 +1,48 @@
-import { Client } from "minio";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-let client: Client | null = null;
+const BUCKET = process.env.MINIO_BUCKET ?? "watchpost";
 
-export function getMinioClient(): Client {
+let client: S3Client | null = null;
+
+function getClient(): S3Client {
   if (!client) {
-    client = new Client({
-      endPoint: process.env.MINIO_ENDPOINT ?? "localhost",
-      port: parseInt(process.env.MINIO_PORT ?? "9000", 10),
-      useSSL: false,
-      accessKey: process.env.MINIO_ACCESS_KEY ?? "watchpost",
-      secretKey: process.env.MINIO_SECRET_KEY ?? "changeme-minio-secret",
+    const endpoint = process.env.MINIO_ENDPOINT ?? "http://localhost:9000";
+    client = new S3Client({
+      endpoint: endpoint.startsWith("http") ? endpoint : `http://${endpoint}`,
+      region: "us-east-1",
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: process.env.MINIO_ACCESS_KEY ?? "watchpost",
+        secretAccessKey: process.env.MINIO_SECRET_KEY ?? "changeme-minio-secret",
+      },
     });
   }
   return client;
 }
 
-const BUCKET = process.env.MINIO_BUCKET ?? "watchpost";
-
-export async function ensureBucket(): Promise<void> {
-  const mc = getMinioClient();
-  const exists = await mc.bucketExists(BUCKET);
-  if (!exists) {
-    await mc.makeBucket(BUCKET);
-  }
-}
-
+/** Upload a buffer to MinIO, returns the object key. */
 export async function uploadBuffer(
   key: string,
   buffer: Buffer,
-  contentType: string
+  contentType: string,
 ): Promise<string> {
-  const mc = getMinioClient();
-  await mc.putObject(BUCKET, key, buffer, buffer.length, {
-    "Content-Type": contentType,
-  });
+  await getClient().send(
+    new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+    }),
+  );
   return key;
 }
 
-export async function getPresignedUrl(
-  key: string,
-  expirySeconds = 3600
-): Promise<string> {
-  const mc = getMinioClient();
-  return mc.presignedGetObject(BUCKET, key, expirySeconds);
+/** Generate a presigned GET URL with 1-hour expiry. */
+export async function getPresignedUrl(key: string): Promise<string> {
+  const command = new GetObjectCommand({
+    Bucket: BUCKET,
+    Key: key,
+  });
+  return getSignedUrl(getClient(), command, { expiresIn: 3600 });
 }
