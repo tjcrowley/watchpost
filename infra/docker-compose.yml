@@ -147,6 +147,7 @@ services:
       SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
       NODE_ENV: ${NODE_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
     healthcheck:
       test: ["CMD-SHELL", "node -e 'process.exit(0)'"]
       interval: 30s
