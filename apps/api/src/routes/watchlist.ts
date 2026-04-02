@@ -1,79 +1,59 @@
 import { type FastifyPluginAsync } from "fastify";
 import { query, queryOne } from "../db/client.js";
 import { uploadBuffer } from "../minio/client.js";
-import type {
-  Subject,
-  CreateSubjectRequest,
-  UpdateSubjectRequest,
-  PaginatedResponse,
-  AuthUser,
-} from "@watchpost/types";
+import axios from "axios";
 import { randomUUID } from "node:crypto";
 
+interface AuthUser {
+  userId: string;
+  siteId: string;
+  role: string;
+  email: string;
+}
+
 export const watchlistRoutes: FastifyPluginAsync = async (app) => {
-  // All watchlist routes require auth
-  app.addHook("onRequest", app.authenticate);
+  // All watchlist routes require JWT
+  app.addHook("onRequest", async (request, reply) => {
+    await request.jwtVerify();
+  });
 
   // GET /api/watchlist
-  app.get<{ Querystring: { page?: string; limit?: string; list_type?: string } }>(
+  app.get<{ Querystring: { list_type?: string; active?: string } }>(
     "/",
     async (request, reply) => {
       const user = request.user as AuthUser;
-      const page = Math.max(1, parseInt(request.query.page ?? "1", 10));
-      const limit = Math.min(100, Math.max(1, parseInt(request.query.limit ?? "25", 10)));
-      const offset = (page - 1) * limit;
-
-      let whereClause = "WHERE s.site_id = $1";
-      const params: unknown[] = [user.site_id];
+      const conditions: string[] = ["site_id = $1"];
+      const params: unknown[] = [user.siteId];
 
       if (request.query.list_type) {
         params.push(request.query.list_type);
-        whereClause += ` AND s.list_type = $${params.length}`;
+        conditions.push(`list_type = $${params.length}`);
       }
 
-      const [subjects, countResult] = await Promise.all([
-        query<Subject>(
-          `SELECT s.* FROM subjects s ${whereClause}
-           ORDER BY s.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-          [...params, limit, offset]
-        ),
-        queryOne<{ count: string }>(
-          `SELECT COUNT(*) as count FROM subjects s ${whereClause}`,
-          params
-        ),
-      ]);
+      if (request.query.active !== undefined) {
+        params.push(request.query.active === "true");
+        conditions.push(`active = $${params.length}`);
+      }
 
-      const total = parseInt(countResult?.count ?? "0", 10);
+      const rows = await query(
+        `SELECT * FROM subjects WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC`,
+        params,
+      );
 
-      const response: PaginatedResponse<Subject> = {
-        data: subjects,
-        total,
-        page,
-        limit,
-        total_pages: Math.ceil(total / limit),
-      };
-
-      return reply.send(response);
-    }
+      return reply.send(rows);
+    },
   );
 
-  // GET /api/watchlist/:id
-  app.get<{ Params: { id: string } }>("/:id", async (request, reply) => {
-    const user = request.user as AuthUser;
-    const subject = await queryOne<Subject>(
-      "SELECT * FROM subjects WHERE id = $1 AND site_id = $2",
-      [request.params.id, user.site_id]
-    );
-
-    if (!subject) {
-      return reply.code(404).send({ error: "Subject not found" });
-    }
-
-    return reply.send(subject);
-  });
-
   // POST /api/watchlist
-  app.post<{ Body: CreateSubjectRequest }>("/", async (request, reply) => {
+  app.post<{
+    Body: {
+      display_name: string;
+      list_type: string;
+      reason?: string;
+      expires_at?: string;
+      notes?: string;
+    };
+  }>("/", async (request, reply) => {
     const user = request.user as AuthUser;
     const { display_name, list_type, reason, expires_at, notes } = request.body;
 
@@ -81,46 +61,66 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(400).send({ error: "display_name and list_type are required" });
     }
 
-    const subject = await queryOne<Subject>(
+    const subject = await queryOne(
       `INSERT INTO subjects (site_id, display_name, list_type, reason, added_by, expires_at, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING *`,
-      [user.site_id, display_name, list_type, reason ?? null, user.id, expires_at ?? null, notes ?? null]
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [user.siteId, display_name, list_type, reason ?? null, user.userId, expires_at ?? null, notes ?? null],
     );
 
-    // Audit log
     await query(
       `INSERT INTO audit_log (site_id, user_id, action, target, meta, ip)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [user.site_id, user.id, "subject.create", subject!.id, JSON.stringify({ list_type }), request.ip]
+      [user.siteId, user.userId, "subject.create", subject!.id, JSON.stringify({ list_type }), request.ip],
     );
 
     return reply.code(201).send(subject);
   });
 
+  // GET /api/watchlist/:id
+  app.get<{ Params: { id: string } }>("/:id", async (request, reply) => {
+    const user = request.user as AuthUser;
+
+    const subject = await queryOne(
+      "SELECT * FROM subjects WHERE id = $1 AND site_id = $2",
+      [request.params.id, user.siteId],
+    );
+
+    if (!subject) {
+      return reply.code(404).send({ error: "Subject not found" });
+    }
+
+    const enrollments = await query(
+      "SELECT id, source_path, quality, created_at FROM face_enrollments WHERE subject_id = $1 ORDER BY created_at DESC",
+      [request.params.id],
+    );
+
+    return reply.send({ ...subject, face_enrollments: enrollments });
+  });
+
   // PATCH /api/watchlist/:id
-  app.patch<{ Params: { id: string }; Body: UpdateSubjectRequest }>(
+  app.patch<{ Params: { id: string }; Body: Record<string, unknown> }>(
     "/:id",
     async (request, reply) => {
       const user = request.user as AuthUser;
       const { id } = request.params;
       const updates = request.body;
 
-      const existing = await queryOne<Subject>(
+      const existing = await queryOne(
         "SELECT * FROM subjects WHERE id = $1 AND site_id = $2",
-        [id, user.site_id]
+        [id, user.siteId],
       );
 
       if (!existing) {
         return reply.code(404).send({ error: "Subject not found" });
       }
 
+      const allowedFields = ["display_name", "list_type", "reason", "expires_at", "active", "notes"];
       const fields: string[] = [];
       const values: unknown[] = [];
       let paramIdx = 1;
 
       for (const [key, value] of Object.entries(updates)) {
-        if (value !== undefined) {
+        if (allowedFields.includes(key) && value !== undefined) {
           fields.push(`${key} = $${paramIdx}`);
           values.push(value);
           paramIdx++;
@@ -128,56 +128,56 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
       }
 
       if (fields.length === 0) {
-        return reply.code(400).send({ error: "No fields to update" });
+        return reply.code(400).send({ error: "No valid fields to update" });
       }
 
       values.push(id);
-      const subject = await queryOne<Subject>(
+      const subject = await queryOne(
         `UPDATE subjects SET ${fields.join(", ")} WHERE id = $${paramIdx} RETURNING *`,
-        values
+        values,
       );
 
       await query(
         `INSERT INTO audit_log (site_id, user_id, action, target, meta, ip)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [user.site_id, user.id, "subject.update", id, JSON.stringify(updates), request.ip]
+        [user.siteId, user.userId, "subject.update", id, JSON.stringify(updates), request.ip],
       );
 
       return reply.send(subject);
-    }
+    },
   );
 
-  // DELETE /api/watchlist/:id
+  // DELETE /api/watchlist/:id — soft delete (set active=false)
   app.delete<{ Params: { id: string } }>("/:id", async (request, reply) => {
     const user = request.user as AuthUser;
     const { id } = request.params;
 
-    const result = await queryOne<Subject>(
-      "DELETE FROM subjects WHERE id = $1 AND site_id = $2 RETURNING id",
-      [id, user.site_id]
+    const subject = await queryOne(
+      "UPDATE subjects SET active = false WHERE id = $1 AND site_id = $2 RETURNING id",
+      [id, user.siteId],
     );
 
-    if (!result) {
+    if (!subject) {
       return reply.code(404).send({ error: "Subject not found" });
     }
 
     await query(
       `INSERT INTO audit_log (site_id, user_id, action, target, ip)
        VALUES ($1, $2, $3, $4, $5)`,
-      [user.site_id, user.id, "subject.delete", id, request.ip]
+      [user.siteId, user.userId, "subject.delete", id, request.ip],
     );
 
     return reply.code(204).send();
   });
 
-  // POST /api/watchlist/:id/enroll — Upload face photo for enrollment
+  // POST /api/watchlist/:id/enroll — upload face photo, enroll via sidecar
   app.post<{ Params: { id: string } }>("/:id/enroll", async (request, reply) => {
     const user = request.user as AuthUser;
     const { id } = request.params;
 
-    const subject = await queryOne<Subject>(
+    const subject = await queryOne(
       "SELECT * FROM subjects WHERE id = $1 AND site_id = $2",
-      [id, user.site_id]
+      [id, user.siteId],
     );
 
     if (!subject) {
@@ -193,43 +193,36 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
     const key = `enrollments/${id}/${randomUUID()}.jpg`;
     await uploadBuffer(key, buffer, file.mimetype);
 
-    // Send to face sidecar for embedding extraction
+    // Send base64 to face sidecar /enroll
     const sidecarUrl = process.env.FACE_SIDECAR_URL ?? "http://face-sidecar:5500";
-    const detectResponse = await fetch(`${sidecarUrl}/detect`, {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: buffer,
+    const response = await axios.post(`${sidecarUrl}/enroll`, {
+      image: buffer.toString("base64"),
     });
 
-    if (!detectResponse.ok) {
-      return reply.code(422).send({ error: "Face detection failed" });
-    }
+    const { embedding, quality } = response.data as { embedding: number[]; quality: number };
 
-    const detection = (await detectResponse.json()) as { faces: Array<{ embedding: number[]; quality: number }> };
-
-    if (detection.faces.length === 0) {
+    if (!embedding || embedding.length === 0) {
       return reply.code(422).send({ error: "No face detected in image" });
     }
 
-    const face = detection.faces[0];
-    const embeddingStr = `[${face.embedding.join(",")}]`;
+    const embeddingStr = `[${embedding.join(",")}]`;
 
     const enrollment = await queryOne<{ id: string; quality: number }>(
       `INSERT INTO face_enrollments (subject_id, embedding, source_path, quality)
        VALUES ($1, $2, $3, $4)
        RETURNING id, quality`,
-      [id, embeddingStr, key, face.quality]
+      [id, embeddingStr, key, quality],
     );
 
     await query(
       `INSERT INTO audit_log (site_id, user_id, action, target, meta, ip)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [user.site_id, user.id, "subject.enroll", id, JSON.stringify({ enrollment_id: enrollment!.id }), request.ip]
+      [user.siteId, user.userId, "subject.enroll", id, JSON.stringify({ enrollment_id: enrollment!.id }), request.ip],
     );
 
     return reply.code(201).send({
       enrollment_id: enrollment!.id,
-      quality: face.quality,
+      quality: enrollment!.quality,
     });
   });
 };
