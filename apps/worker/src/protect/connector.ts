@@ -184,7 +184,7 @@ async function connect(): Promise<void> {
     });
 
     ws.on("close", () => { logger.warn("WebSocket disconnected"); redis.quit(); resolve(); });
-    ws.on("error", (err) => { logger.error(err, "WebSocket error"); redis.quit(); reject(err); });
+    ws.on("error", (err: Error) => { logger.error(err, "WebSocket error"); redis.quit(); reject(err); });
   });
 }
 
