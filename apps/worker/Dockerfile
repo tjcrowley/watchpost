@@ -12,7 +12,7 @@ RUN pnpm --filter @watchpost/types build
 RUN pnpm --filter @watchpost/logger build
 RUN pnpm --filter @watchpost/db build
 WORKDIR /app/apps/worker
-RUN pnpm build
+RUN rm -rf dist && pnpm build
 
 # Production: keep full /app layout so workspace package resolution works
 FROM node:20-slim AS production
