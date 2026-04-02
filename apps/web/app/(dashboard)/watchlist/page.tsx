@@ -1,179 +1,204 @@
 "use client";
 
-import { useEffect, useState, useRef, type FormEvent } from "react";
+import { useEffect, useState, useRef, useCallback, type FormEvent, type DragEvent } from "react";
 import type { Subject, PaginatedResponse, ListType } from "@watchpost/types";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Plus, Upload, Pencil, ShieldOff, ImageIcon } from "lucide-react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
+function getToken() {
+  return localStorage.getItem("watchpost_token");
+}
+
+function authHeaders(): HeadersInit {
+  return {
+    Authorization: `Bearer ${getToken()}`,
+    "Content-Type": "application/json",
+  };
+}
+
 export default function WatchlistPage() {
+  const [tab, setTab] = useState<ListType>("ban");
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showModal, setShowModal] = useState(false);
-  const [editSubject, setEditSubject] = useState<Subject | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Form state
+  // Add/Edit dialog
+  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [editSubject, setEditSubject] = useState<Subject | null>(null);
   const [displayName, setDisplayName] = useState("");
-  const [listType, setListType] = useState<ListType>("watch");
   const [reason, setReason] = useState("");
   const [notes, setNotes] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
 
-  useEffect(() => {
-    fetchSubjects();
-  }, []);
+  // Enroll dialog
+  const [enrollSubject, setEnrollSubject] = useState<Subject | null>(null);
+  const [enrollFile, setEnrollFile] = useState<File | null>(null);
+  const [enrollPreview, setEnrollPreview] = useState<string | null>(null);
+  const [enrollResult, setEnrollResult] = useState<{ quality: number; crop?: string } | null>(null);
+  const [enrolling, setEnrolling] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  async function fetchSubjects() {
+  // Deactivate confirmation
+  const [deactivateSubject, setDeactivateSubject] = useState<Subject | null>(null);
+
+  const fetchSubjects = useCallback(async () => {
     setLoading(true);
-    const token = localStorage.getItem("watchpost_token");
     try {
-      const res = await fetch(`${API_URL}/api/watchlist?limit=100`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await fetch(`${API_URL}/api/watchlist?list_type=${tab}&limit=100`, {
+        headers: { Authorization: `Bearer ${getToken()}` },
       });
       const data: PaginatedResponse<Subject> = await res.json();
-      setSubjects(data.data);
+      setSubjects(data.data ?? []);
     } catch {
       console.error("Failed to fetch subjects");
     } finally {
       setLoading(false);
     }
-  }
+  }, [tab]);
 
+  useEffect(() => {
+    fetchSubjects();
+  }, [fetchSubjects]);
+
+  // ─── Add / Edit ─────────────────────────────
   function openAdd() {
     setEditSubject(null);
     setDisplayName("");
-    setListType("watch");
     setReason("");
     setNotes("");
-    setShowModal(true);
+    setExpiresAt("");
+    setShowAddDialog(true);
   }
 
   function openEdit(subject: Subject) {
     setEditSubject(subject);
     setDisplayName(subject.display_name);
-    setListType(subject.list_type);
     setReason(subject.reason ?? "");
     setNotes(subject.notes ?? "");
-    setShowModal(true);
+    setExpiresAt(subject.expires_at?.slice(0, 10) ?? "");
+    setShowAddDialog(true);
   }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    const token = localStorage.getItem("watchpost_token");
     const body = {
       display_name: displayName,
-      list_type: listType,
+      list_type: editSubject ? undefined : tab,
       reason: reason || undefined,
       notes: notes || undefined,
+      expires_at: expiresAt || undefined,
     };
 
     if (editSubject) {
       await fetch(`${API_URL}/api/watchlist/${editSubject.id}`, {
         method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
+        headers: authHeaders(),
         body: JSON.stringify(body),
       });
     } else {
       await fetch(`${API_URL}/api/watchlist`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
+        headers: authHeaders(),
         body: JSON.stringify(body),
       });
     }
 
-    setShowModal(false);
+    setShowAddDialog(false);
     fetchSubjects();
   }
 
-  async function handleEnroll(subjectId: string) {
-    const input = fileInputRef.current;
-    if (!input) return;
+  // ─── Enroll Photo ──────────────────────────
+  function openEnroll(subject: Subject) {
+    setEnrollSubject(subject);
+    setEnrollFile(null);
+    setEnrollPreview(null);
+    setEnrollResult(null);
+    setEnrolling(false);
+  }
 
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return;
+  function handleFileDrop(e: DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith("image/")) {
+      setEnrollFile(file);
+      setEnrollPreview(URL.createObjectURL(file));
+      setEnrollResult(null);
+    }
+  }
 
-      const token = localStorage.getItem("watchpost_token");
+  function handleFileSelect(files: FileList | null) {
+    const file = files?.[0];
+    if (file) {
+      setEnrollFile(file);
+      setEnrollPreview(URL.createObjectURL(file));
+      setEnrollResult(null);
+    }
+  }
+
+  async function submitEnroll() {
+    if (!enrollSubject || !enrollFile) return;
+    setEnrolling(true);
+    try {
       const formData = new FormData();
-      formData.append("file", file);
-
-      try {
-        const res = await fetch(`${API_URL}/api/watchlist/${subjectId}/enroll`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: formData,
-        });
-
-        if (res.ok) {
-          const data = await res.json();
-          alert(`Face enrolled! Quality score: ${(data.quality * 100).toFixed(1)}%`);
-        } else {
-          const err = await res.json();
-          alert(`Enrollment failed: ${err.error}`);
-        }
-      } catch {
-        alert("Failed to enroll face");
+      formData.append("file", enrollFile);
+      const res = await fetch(`${API_URL}/api/watchlist/${enrollSubject.id}/enroll`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${getToken()}` },
+        body: formData,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setEnrollResult({ quality: data.quality, crop: data.crop_path });
+      } else {
+        const err = await res.json();
+        alert(`Enrollment failed: ${err.error}`);
       }
-
-      input.value = "";
-    };
-    input.click();
+    } catch {
+      alert("Failed to enroll face");
+    } finally {
+      setEnrolling(false);
+    }
   }
 
-  async function handleDelete(id: string) {
-    if (!confirm("Remove this subject from the watchlist?")) return;
-
-    const token = localStorage.getItem("watchpost_token");
-    await fetch(`${API_URL}/api/watchlist/${id}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
+  // ─── Deactivate ─────────────────────────────
+  async function confirmDeactivate() {
+    if (!deactivateSubject) return;
+    await fetch(`${API_URL}/api/watchlist/${deactivateSubject.id}`, {
+      method: "PATCH",
+      headers: authHeaders(),
+      body: JSON.stringify({ active: false }),
     });
+    setDeactivateSubject(null);
     fetchSubjects();
   }
 
-  function listTypeBadge(type: ListType) {
-    const colors: Record<ListType, string> = {
-      ban: "bg-red-500/20 text-red-400 border-red-500/30",
-      watch: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
-      vip: "bg-green-500/20 text-green-400 border-green-500/30",
-    };
+  // ─── Table ──────────────────────────────────
+  function renderTable(items: Subject[]) {
     return (
-      <span
-        className={`rounded-full border px-2 py-0.5 text-xs font-medium uppercase ${colors[type]}`}
-      >
-        {type}
-      </span>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      <input type="file" ref={fileInputRef} accept="image/*" className="hidden" />
-
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Watchlist</h1>
-        <button
-          onClick={openAdd}
-          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-        >
-          Add Subject
-        </button>
-      </div>
-
       <div className="overflow-hidden rounded-lg border border-border">
         <table className="w-full text-sm">
           <thead className="bg-muted/50">
             <tr>
               <th className="px-4 py-3 text-left font-medium">Name</th>
-              <th className="px-4 py-3 text-left font-medium">List</th>
               <th className="px-4 py-3 text-left font-medium">Reason</th>
-              <th className="px-4 py-3 text-left font-medium">Status</th>
               <th className="px-4 py-3 text-left font-medium">Added</th>
+              <th className="px-4 py-3 text-left font-medium">Expires</th>
+              <th className="px-4 py-3 text-left font-medium">Active</th>
               <th className="px-4 py-3 text-left font-medium">Actions</th>
             </tr>
           </thead>
@@ -184,54 +209,60 @@ export default function WatchlistPage() {
                   Loading...
                 </td>
               </tr>
-            ) : subjects.length === 0 ? (
+            ) : items.length === 0 ? (
               <tr>
                 <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
-                  No subjects in watchlist. Click &quot;Add Subject&quot; to get started.
+                  No subjects in this list. Click &quot;Add Person&quot; to get started.
                 </td>
               </tr>
             ) : (
-              subjects.map((subject) => (
+              items.map((subject) => (
                 <tr key={subject.id} className="hover:bg-muted/30">
                   <td className="px-4 py-3 font-medium">{subject.display_name}</td>
-                  <td className="px-4 py-3">{listTypeBadge(subject.list_type)}</td>
-                  <td className="px-4 py-3 text-muted-foreground">
-                    {subject.reason ?? "—"}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={`rounded px-1.5 py-0.5 text-xs ${
-                        subject.active
-                          ? "bg-green-500/20 text-green-400"
-                          : "bg-muted text-muted-foreground"
-                      }`}
-                    >
-                      {subject.active ? "Active" : "Inactive"}
-                    </span>
-                  </td>
+                  <td className="px-4 py-3 text-muted-foreground">{subject.reason ?? "—"}</td>
                   <td className="px-4 py-3 text-muted-foreground">
                     {new Date(subject.created_at).toLocaleDateString()}
                   </td>
+                  <td className="px-4 py-3 text-muted-foreground">
+                    {subject.expires_at
+                      ? new Date(subject.expires_at).toLocaleDateString()
+                      : "Never"}
+                  </td>
+                  <td className="px-4 py-3">
+                    {subject.active ? (
+                      <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Active</Badge>
+                    ) : (
+                      <Badge variant="secondary">Inactive</Badge>
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     <div className="flex gap-1">
-                      <button
-                        onClick={() => handleEnroll(subject.id)}
-                        className="rounded bg-primary/20 px-2 py-1 text-xs text-primary hover:bg-primary/30"
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 gap-1 text-primary"
+                        onClick={() => openEnroll(subject)}
                       >
-                        Enroll Face
-                      </button>
-                      <button
+                        <Upload className="h-3.5 w-3.5" /> Enroll Photo
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 gap-1"
                         onClick={() => openEdit(subject)}
-                        className="rounded bg-muted px-2 py-1 text-xs hover:bg-muted/80"
                       >
-                        Edit
-                      </button>
-                      <button
-                        onClick={() => handleDelete(subject.id)}
-                        className="rounded bg-destructive/20 px-2 py-1 text-xs text-destructive hover:bg-destructive/30"
-                      >
-                        Remove
-                      </button>
+                        <Pencil className="h-3.5 w-3.5" /> Edit
+                      </Button>
+                      {subject.active && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 gap-1 text-destructive hover:bg-destructive/20 hover:text-destructive"
+                          onClick={() => setDeactivateSubject(subject)}
+                        >
+                          <ShieldOff className="h-3.5 w-3.5" /> Deactivate
+                        </Button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -240,79 +271,197 @@ export default function WatchlistPage() {
           </tbody>
         </table>
       </div>
+    );
+  }
 
-      {/* Add/Edit Modal */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-lg">
-            <h2 className="text-lg font-semibold">
-              {editSubject ? "Edit Subject" : "Add Subject"}
-            </h2>
+  const tabLabel: Record<ListType, string> = {
+    ban: "Ban List",
+    watch: "Watch List",
+    vip: "VIP List",
+  };
 
-            <form onSubmit={handleSubmit} className="mt-4 space-y-4">
-              <div>
-                <label className="block text-sm font-medium">Display Name</label>
-                <input
-                  required
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Watchlist</h1>
+        <Button onClick={openAdd}>
+          <Plus className="mr-1 h-4 w-4" /> Add Person
+        </Button>
+      </div>
+
+      <Tabs value={tab} onValueChange={(v) => setTab(v as ListType)}>
+        <TabsList>
+          <TabsTrigger value="ban">Ban List</TabsTrigger>
+          <TabsTrigger value="watch">Watch List</TabsTrigger>
+          <TabsTrigger value="vip">VIP List</TabsTrigger>
+        </TabsList>
+        {(["ban", "watch", "vip"] as ListType[]).map((lt) => (
+          <TabsContent key={lt} value={lt}>
+            {renderTable(subjects)}
+          </TabsContent>
+        ))}
+      </Tabs>
+
+      {/* ─── Add / Edit Dialog ──────────────────── */}
+      <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{editSubject ? "Edit Person" : "Add Person"}</DialogTitle>
+            <DialogDescription>
+              {editSubject
+                ? "Update the subject details."
+                : `Add a new person to the ${tabLabel[tab]}.`}
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="name">Display Name</Label>
+              <Input
+                id="name"
+                required
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="reason">Reason</Label>
+              <Input
+                id="reason"
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="Optional"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="notes">Notes</Label>
+              <textarea
+                id="notes"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={3}
+                placeholder="Optional"
+                className="flex w-full rounded-md border border-border bg-background px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="expires">Expires At</Label>
+              <Input
+                id="expires"
+                type="date"
+                value={expiresAt}
+                onChange={(e) => setExpiresAt(e.target.value)}
+              />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setShowAddDialog(false)}>
+                Cancel
+              </Button>
+              <Button type="submit">{editSubject ? "Save" : "Add"}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── Enroll Photo Dialog ────────────────── */}
+      <Dialog open={!!enrollSubject} onOpenChange={(open) => !open && setEnrollSubject(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Enroll Photo</DialogTitle>
+            <DialogDescription>
+              Upload a photo of {enrollSubject?.display_name} for face recognition.
+            </DialogDescription>
+          </DialogHeader>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => handleFileSelect(e.target.files)}
+          />
+
+          {!enrollResult ? (
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragOver(true);
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleFileDrop}
+              onClick={() => fileInputRef.current?.click()}
+              className={`flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 transition-colors ${
+                dragOver
+                  ? "border-primary bg-primary/5"
+                  : "border-border hover:border-muted-foreground"
+              }`}
+            >
+              {enrollPreview ? (
+                <img
+                  src={enrollPreview}
+                  alt="Preview"
+                  className="mb-3 h-48 rounded border border-border object-cover"
                 />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium">List Type</label>
-                <select
-                  value={listType}
-                  onChange={(e) => setListType(e.target.value as ListType)}
-                  className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                >
-                  <option value="ban">Ban</option>
-                  <option value="watch">Watch</option>
-                  <option value="vip">VIP</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium">Reason</label>
-                <input
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                  placeholder="Optional"
+              ) : (
+                <>
+                  <ImageIcon className="mb-3 h-10 w-10 text-muted-foreground/50" />
+                  <p className="text-sm text-muted-foreground">
+                    Drag & drop an image here, or click to browse
+                  </p>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3 text-center">
+              {enrollResult.crop && (
+                <img
+                  src={`${API_URL}${enrollResult.crop}`}
+                  alt="Face crop"
+                  className="mx-auto h-40 rounded border border-border"
                 />
-              </div>
+              )}
+              <p className="text-sm">
+                Quality Score:{" "}
+                <span className="font-semibold text-green-400">
+                  {(enrollResult.quality * 100).toFixed(1)}%
+                </span>
+              </p>
+            </div>
+          )}
 
-              <div>
-                <label className="block text-sm font-medium">Notes</label>
-                <textarea
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  rows={3}
-                  className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                  placeholder="Optional"
-                />
-              </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEnrollSubject(null)}>
+              {enrollResult ? "Done" : "Cancel"}
+            </Button>
+            {!enrollResult && (
+              <Button onClick={submitEnroll} disabled={!enrollFile || enrolling}>
+                {enrolling ? "Enrolling..." : "Enroll"}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowModal(false)}
-                  className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-                >
-                  {editSubject ? "Save" : "Add"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* ─── Deactivate Confirmation ────────────── */}
+      <Dialog open={!!deactivateSubject} onOpenChange={(open) => !open && setDeactivateSubject(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Deactivate Subject</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to deactivate{" "}
+              <strong>{deactivateSubject?.display_name}</strong>? They will no longer
+              trigger alerts.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeactivateSubject(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmDeactivate}>
+              Deactivate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
