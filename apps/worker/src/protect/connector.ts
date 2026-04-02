@@ -170,12 +170,16 @@ async function connect(): Promise<void> {
         }
 
         if (!packet || packet.modelKey !== "event" || packet.action !== "add") return;
-        if (!packet.payload || packet.payload.type !== "smartDetectZone") return;
+        if (!packet.payload) return;
 
-        const smartTypes: string[] = packet.payload.smartDetectTypes ?? [];
-        if (!smartTypes.includes("person")) return;
+        const eventType: string = packet.payload.type ?? "";
+        // Accept smartDetectZone (G4/G5) or motion (G3)
+        const isPersonDetect = eventType === "smartDetectZone" &&
+          (packet.payload.smartDetectTypes ?? []).includes("person");
+        const isMotion = eventType === "motion";
+        if (!isPersonDetect && !isMotion) return;
 
-        logger.info({ camera: packet.payload.camera, id: packet.payload.id }, "Person detection");
+        logger.info({ type: eventType, camera: packet.payload.camera, id: packet.payload.id }, "Detection event");
 
         const camResult = await pool.query(
           "SELECT id FROM cameras WHERE protect_id = $1 AND site_id = $2",
