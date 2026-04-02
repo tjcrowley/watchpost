@@ -7,7 +7,10 @@ import { processEvent } from "../pipeline/processor.js";
 
 const logger = createLogger("protect-connector");
 
-const PROTECT_URL = process.env.PROTECT_URL ?? "https://192.168.1.1";
+// ProtectApi v3 takes just the hostname/IP, not a full URL
+const PROTECT_URL = (process.env.PROTECT_URL ?? "192.168.1.1")
+  .replace(/^https?:\/\//, "")  // strip scheme if present
+  .replace(/\/$/, "");           // strip trailing slash
 const PROTECT_USERNAME = process.env.PROTECT_USERNAME ?? "";
 const PROTECT_PASSWORD = process.env.PROTECT_PASSWORD ?? "";
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
