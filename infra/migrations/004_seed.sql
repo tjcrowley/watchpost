@@ -12,7 +12,7 @@ INSERT INTO users (site_id, email, password_hash, role)
 VALUES (
   '00000000-0000-0000-0000-000000000001',
   'admin@watchpost.local',
-  '$2b$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi',
+  '$2b$10$7MJqYo9gMVM5AlxfiK0jk.Mraz4HSE1ty2a1tBwPIH9Dh6RdxJ/eC',
   'admin'
 )
 ON CONFLICT (email) DO NOTHING;
