@@ -146,28 +146,32 @@ async function connect(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     ws.on("open", () => { logger.info("Events WebSocket connected"); });
 
+    let msgCount = 0;
+    setInterval(() => {
+      if (msgCount > 0) logger.info({ count: msgCount }, "WS messages received so far");
+      else logger.warn("No WS messages received yet");
+    }, 15000);
+
     ws.on("message", async (data: Buffer) => {
+      msgCount++;
       try {
         // Protect binary packet: 8-byte header + JSON body
         if (data.length < 8) return;
 
         let packet: any;
         try {
-          // Skip 8-byte binary header, parse JSON from byte 8
           packet = JSON.parse(data.slice(8).toString());
         } catch {
           try {
-            // Fallback: plain JSON (some firmware)
             packet = JSON.parse(data.toString());
           } catch {
             return;
           }
         }
 
-        // Log non-nvr events for debugging
-        if (packet.modelKey !== "nvr") {
-          logger.info({ modelKey: packet.modelKey, action: packet.action, type: packet.payload?.type }, "Protect event");
-        }
+        // Log every unique action+modelKey combo
+        const sig = `${packet.action}:${packet.modelKey ?? "none"}`;
+        logger.info({ sig, action: packet.action, modelKey: packet.modelKey, topKeys: Object.keys(packet).join(",") }, "Protect packet");
 
         if (!packet || packet.modelKey !== "event" || packet.action !== "add") return;
         if (!packet.payload) return;
