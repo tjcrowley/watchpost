@@ -19,6 +19,6 @@
     "docker:dev": "docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d"
   },
   "dependencies": {
-    "unifi-protect": "^4.28.0"
+    "unifi-protect": "3.0.4"
   }
 }

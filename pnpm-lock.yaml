@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       unifi-protect:
-        specifier: ^4.28.0
-        version: 4.28.0
+        specifier: 3.0.4
+        version: 3.0.4
 
   apps/api:
     dependencies:
