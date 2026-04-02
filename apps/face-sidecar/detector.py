@@ -1,58 +1,58 @@
 """Face detection and embedding extraction using InsightFace buffalo_sc model."""
 
 import io
-from dataclasses import dataclass
 
-import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
 from PIL import Image
 
-
-@dataclass
-class DetectedFace:
-    bbox: tuple[float, float, float, float]
-    confidence: float
-    embedding: list[float]
-    quality: float
+app = FaceAnalysis(name="buffalo_sc", providers=["CPUExecutionProvider"])
+app.prepare(ctx_id=0, det_size=(640, 640))
 
 
-class FaceDetector:
-    """Wraps InsightFace for face detection and 512-d embedding extraction."""
+def detect_faces(image_bytes: bytes) -> list[dict]:
+    """Detect faces in a JPEG/PNG image and return bounding boxes, quality, embeddings, and det_score."""
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = np.array(image)
 
-    def __init__(self, model_name: str = "buffalo_sc", ctx_id: int = 0) -> None:
-        self._app = FaceAnalysis(
-            name=model_name,
-            allowed_modules=["detection", "recognition"],
-        )
-        self._app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+    faces = app.get(img)
 
-    def detect(self, image_bytes: bytes) -> list[DetectedFace]:
-        """Detect faces in a JPEG/PNG image and return embeddings."""
-        image = Image.open(io.BytesIO(image_bytes))
-        frame = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    results: list[dict] = []
+    for face in faces:
+        det_score = float(face.det_score)
+        if det_score < 0.3:
+            continue
 
-        faces = self._app.get(frame)
+        bbox = face.bbox.tolist()
+        embedding = face.normed_embedding.tolist()
 
-        results: list[DetectedFace] = []
-        for face in faces:
-            bbox = face.bbox.tolist()
-            confidence = float(face.det_score)
-            embedding = face.normed_embedding.tolist()
+        face_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+        image_area = img.shape[0] * img.shape[1]
+        area_ratio = face_area / image_area if image_area > 0 else 0
+        quality = min(1.0, det_score * 0.6 + area_ratio * 4.0)
 
-            # Quality heuristic: face area relative to image + detection score
-            face_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-            image_area = frame.shape[0] * frame.shape[1]
-            area_ratio = face_area / image_area if image_area > 0 else 0
-            quality = min(1.0, confidence * 0.6 + area_ratio * 4.0)
+        results.append({
+            "bbox": [bbox[0], bbox[1], bbox[2], bbox[3]],
+            "quality": quality,
+            "embedding": embedding,
+            "det_score": det_score,
+        })
 
-            results.append(
-                DetectedFace(
-                    bbox=(bbox[0], bbox[1], bbox[2], bbox[3]),
-                    confidence=confidence,
-                    embedding=embedding,
-                    quality=quality,
-                )
-            )
+    return results
 
-        return results
+
+def crop_face(image_bytes: bytes, bbox: list) -> bytes:
+    """Crop a face region from the image and return JPEG bytes."""
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+
+    x1 = max(0, x1)
+    y1 = max(0, y1)
+    x2 = min(image.width, x2)
+    y2 = min(image.height, y2)
+
+    cropped = image.crop((x1, y1, x2, y2))
+
+    buf = io.BytesIO()
+    cropped.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
