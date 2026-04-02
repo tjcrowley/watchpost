@@ -27,15 +27,16 @@ async function getSiteId(): Promise<string> {
 async function syncCameras(siteId: string): Promise<void> {
   if (!protect) return;
 
-  const bootstrap = await protect.getBootstrap();
-  if (!bootstrap) {
-    throw new Error("Failed to get Protect bootstrap");
+  const bootstrapped = await protect.bootstrapController();
+  if (!bootstrapped) {
+    throw new Error("Failed to bootstrap Protect controller");
   }
 
-  logger.info({ cameras: bootstrap.cameras.length }, "Protect bootstrap loaded");
+  const cameras = protect.bootstrap?.cameras ?? [];
+  logger.info({ cameras: cameras.length }, "Protect bootstrap loaded");
 
   const pool = getPool();
-  for (const cam of bootstrap.cameras) {
+  for (const cam of cameras) {
     await pool.query(
       `INSERT INTO cameras (site_id, protect_id, name)
        VALUES ($1, $2, $3)
@@ -43,7 +44,7 @@ async function syncCameras(siteId: string): Promise<void> {
       [siteId, cam.id, cam.name]
     );
   }
-  logger.info({ synced: bootstrap.cameras.length }, "Cameras synced");
+  logger.info({ synced: cameras.length }, "Cameras synced");
 }
 
 async function subscribeToEvents(siteId: string): Promise<void> {
@@ -85,10 +86,7 @@ async function subscribeToEvents(siteId: string): Promise<void> {
       // Fetch snapshot JPEG from Protect API
       let snapshot: Buffer | null = null;
       try {
-        snapshot = await protect!.getSnapshot(payload.camera, {
-          width: 1920,
-          height: 1080,
-        });
+        snapshot = await protect!.getSnapshot(payload.camera);
         logger.debug({ camera: payload.camera, bytes: snapshot?.length }, "Snapshot fetched");
       } catch (err) {
         logger.error(err, "Failed to fetch snapshot");
@@ -127,6 +125,13 @@ async function connect(): Promise<void> {
   const siteId = await getSiteId();
   await syncCameras(siteId);
   await subscribeToEvents(siteId);
+
+  // Start the events websocket stream
+  const wsStarted = await protect.launchEventsWs();
+  if (!wsStarted) {
+    throw new Error("Failed to start Protect events websocket");
+  }
+  logger.info("Protect events websocket started");
 }
 
 async function connectWithBackoff(): Promise<void> {

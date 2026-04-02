@@ -31,6 +31,7 @@ export interface Camera {
 export type ListType = "ban" | "watch" | "vip";
 
 export interface Subject {
+  [key: string]: unknown;
   id: string;
   site_id: string;
   display_name: string;
@@ -55,6 +56,7 @@ export interface FaceEnrollment {
 export type ReviewStatus = "pending" | "confirmed" | "dismissed";
 
 export interface DetectionEvent {
+  [key: string]: unknown;
   id: string;
   site_id: string;
   camera_id: string;
