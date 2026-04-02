@@ -9,9 +9,12 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.62.0",
     "@watchpost/types": "workspace:*",
+    "axios": "^1.7.9",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.0",
+    "date-fns": "^4.1.0",
     "lucide-react": "^0.468.0",
     "next": "^15.1.0",
     "react": "^19.0.0",
