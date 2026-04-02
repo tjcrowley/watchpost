@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { format } from "date-fns";
+import { Radio } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 import type { WsMessage, DetectionEvent } from "@watchpost/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -9,15 +14,38 @@ const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:3001";
 interface LiveEvent extends DetectionEvent {
   match_display_name?: string;
   match_list_type?: string;
+  camera_name?: string;
+}
+
+function matchBadgeVariant(type?: string) {
+  switch (type) {
+    case "ban": return "ban" as const;
+    case "watch": return "watch" as const;
+    case "vip": return "vip" as const;
+    default: return "secondary" as const;
+  }
 }
 
 export default function LivePage() {
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [connected, setConnected] = useState(false);
+  const [flashIds, setFlashIds] = useState<Set<string>>(new Set());
   const wsRef = useRef<WebSocket | null>(null);
 
+  const eventCount = events.length;
+
+  const addFlash = useCallback((id: string) => {
+    setFlashIds((prev) => new Set(prev).add(id));
+    setTimeout(() => {
+      setFlashIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }, 3000);
+  }, []);
+
   useEffect(() => {
-    // Fetch recent events
     const token = localStorage.getItem("watchpost_token");
     fetch(`${API_URL}/api/events?limit=20`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -26,8 +54,7 @@ export default function LivePage() {
       .then((data) => setEvents(data.data ?? []))
       .catch(console.error);
 
-    // Connect WebSocket
-    const ws = new WebSocket(`${WS_URL}/api/ws`);
+    const ws = new WebSocket(`${WS_URL}/ws/events`);
     wsRef.current = ws;
 
     ws.onopen = () => setConnected(true);
@@ -37,7 +64,11 @@ export default function LivePage() {
       try {
         const parsed: WsMessage = JSON.parse(msg.data);
         if (parsed.type === "detection") {
-          setEvents((prev) => [parsed.payload as unknown as LiveEvent, ...prev].slice(0, 50));
+          const event = parsed.payload as unknown as LiveEvent;
+          setEvents((prev) => [event, ...prev].slice(0, 50));
+          if (event.match_list_type === "ban") {
+            addFlash(event.id);
+          }
         }
       } catch {
         // ignore malformed messages
@@ -47,28 +78,25 @@ export default function LivePage() {
     return () => {
       ws.close();
     };
-  }, []);
-
-  function listTypeColor(type?: string): string {
-    switch (type) {
-      case "ban":
-        return "bg-red-500/20 text-red-400 border-red-500/30";
-      case "watch":
-        return "bg-yellow-500/20 text-yellow-400 border-yellow-500/30";
-      case "vip":
-        return "bg-green-500/20 text-green-400 border-green-500/30";
-      default:
-        return "bg-muted text-muted-foreground";
-    }
-  }
+  }, [addFlash]);
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Live Feed</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold">Live Feed</h1>
+          {eventCount > 0 && (
+            <Badge variant="default" className="text-xs">
+              {eventCount}
+            </Badge>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <span
-            className={`h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`}
+            className={cn(
+              "h-2 w-2 rounded-full",
+              connected ? "bg-green-500 animate-pulse" : "bg-red-500"
+            )}
           />
           <span className="text-sm text-muted-foreground">
             {connected ? "Connected" : "Disconnected"}
@@ -76,69 +104,79 @@ export default function LivePage() {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {events.map((event) => (
-          <div
-            key={event.id}
-            className={`rounded-lg border p-4 transition-all ${
-              event.match_list_type === "ban"
-                ? "animate-pulse border-red-500/50 bg-red-500/5"
-                : "border-border bg-card"
-            }`}
-          >
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm font-medium">
-                  {event.event_type}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {new Date(event.detected_at).toLocaleTimeString()}
-                </p>
-              </div>
-
-              {event.match_list_type && (
-                <span
-                  className={`rounded-full border px-2 py-0.5 text-xs font-medium uppercase ${listTypeColor(event.match_list_type)}`}
-                >
-                  {event.match_list_type}
-                </span>
+      {events.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <Radio className="mb-4 h-12 w-12 text-muted-foreground/50" />
+          <p className="text-lg font-medium text-muted-foreground">
+            No events yet — watching cameras...
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground/70">
+            Detection events will appear here in real-time
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {events.map((event) => (
+            <Card
+              key={event.id}
+              className={cn(
+                "transition-all duration-300",
+                event.match_list_type === "ban" && flashIds.has(event.id) &&
+                  "border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.3)]",
+                event.match_list_type === "ban" && !flashIds.has(event.id) &&
+                  "border-red-500/30"
               )}
-            </div>
+            >
+              <CardContent className="flex items-start gap-4 p-4">
+                {/* Snapshot thumbnail */}
+                {event.snapshot_path ? (
+                  <img
+                    src={`${API_URL}${event.snapshot_path}`}
+                    alt="Snapshot"
+                    className="h-16 w-24 rounded-md object-cover bg-muted"
+                  />
+                ) : (
+                  <div className="flex h-16 w-24 items-center justify-center rounded-md bg-muted">
+                    <Radio className="h-5 w-5 text-muted-foreground/50" />
+                  </div>
+                )}
 
-            {event.match_display_name && (
-              <p className="mt-2 text-sm font-semibold">
-                {event.match_display_name}
-              </p>
-            )}
+                {/* Event details */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{event.event_type}</span>
+                      {event.camera_name && (
+                        <span className="text-xs text-muted-foreground">
+                          {event.camera_name}
+                        </span>
+                      )}
+                    </div>
+                    <Badge variant={matchBadgeVariant(event.match_list_type)}>
+                      {event.match_list_type?.toUpperCase() ?? "NO MATCH"}
+                    </Badge>
+                  </div>
 
-            {event.match_confidence != null && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                Confidence: {(event.match_confidence * 100).toFixed(1)}%
-              </p>
-            )}
+                  {event.match_display_name && (
+                    <p className="mt-1 text-sm font-semibold">
+                      {event.match_display_name}
+                    </p>
+                  )}
 
-            <div className="mt-3 flex gap-2">
-              <span
-                className={`rounded px-1.5 py-0.5 text-xs ${
-                  event.review_status === "confirmed"
-                    ? "bg-green-500/20 text-green-400"
-                    : event.review_status === "dismissed"
-                      ? "bg-muted text-muted-foreground"
-                      : "bg-yellow-500/20 text-yellow-400"
-                }`}
-              >
-                {event.review_status}
-              </span>
-            </div>
-          </div>
-        ))}
-
-        {events.length === 0 && (
-          <div className="col-span-full py-12 text-center text-muted-foreground">
-            No detection events yet. Events will appear here in real-time.
-          </div>
-        )}
-      </div>
+                  <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
+                    <span>{format(new Date(event.detected_at), "HH:mm:ss")}</span>
+                    {event.match_confidence != null && (
+                      <span>
+                        {(event.match_confidence * 100).toFixed(1)}% confidence
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
