@@ -81,8 +81,10 @@ Built for **maritime venues, co-working spaces, event venues, and marinas**.
 
 ### Data Flow
 
-1. **Worker** connects to UniFi Protect via WebSocket and subscribes to smart detection events
-2. On detection, it fetches the camera snapshot and sends it to the **Face Sidecar**
+1. **Worker** connects to UniFi Protect via WebSocket and subscribes to motion and smart detection events
+   - Protect uses a binary protocol: 8-byte header (action frame) + variable-length JSON body
+   - A second optional binary frame carries the snapshot payload
+2. On detection, it fetches the camera snapshot via `apiRequestRaw()` and sends it to the **Face Sidecar**
 3. **Face Sidecar** runs InsightFace to extract 512-d face embeddings
 4. **Worker** queries **pgvector** for the nearest enrolled face
 5. If a match is found (cosine distance < threshold), an **alert** is created
@@ -268,6 +270,7 @@ All endpoints require JWT authentication (except `/api/auth/login` and `/health`
 | `GET` | `/api/cameras/:id` | Get camera details |
 | `PATCH` | `/api/cameras/:id` | Update camera config |
 | `POST` | `/api/cameras/sync` | Sync cameras from Protect |
+| `GET` | `/api/cameras/:id/snapshot` | Proxy live snapshot from Protect |
 
 ### Alerts
 | Method | Path | Description |
@@ -339,6 +342,10 @@ watchpost/
 - [x] Multi-channel alerts (webhook, SMS, email)
 - [x] Audit logging
 - [x] Docker Compose deployment
+- [x] UniFi Protect binary WebSocket protocol (8-byte header framing)
+- [x] Motion + smartDetect event detection
+- [x] Camera snapshot proxy (`GET /api/cameras/:id/snapshot`)
+- [x] All containers healthy (health checks fixed for face-sidecar and nginx)
 
 ### v1.1 — Polish
 - [ ] Alert destination management UI
