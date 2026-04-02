@@ -6,19 +6,14 @@ FROM base AS build
 COPY .npmrc package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/ ./packages/
 COPY apps/worker/ ./apps/worker/
-RUN pnpm install --filter @watchpost/worker... --no-frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 WORKDIR /app/apps/worker
 RUN pnpm build
 
-FROM base AS production
-WORKDIR /app
-COPY .npmrc package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/ ./packages/
-COPY apps/worker/ ./apps/worker/
-COPY --from=build /app/packages/types/dist ./packages/types/dist
-COPY --from=build /app/packages/logger/dist ./packages/logger/dist
-COPY --from=build /app/packages/db/dist ./packages/db/dist
-COPY --from=build /app/apps/worker/dist ./apps/worker/dist
-RUN pnpm install --filter @watchpost/worker --prod --no-frozen-lockfile
+FROM node:20-slim AS production
 WORKDIR /app/apps/worker
+COPY --from=build /app/node_modules /app/node_modules
+COPY --from=build /app/packages /app/packages
+COPY --from=build /app/apps/worker/dist ./dist
+COPY --from=build /app/apps/worker/package.json ./package.json
 CMD ["node", "dist/protect/connector.js"]
