@@ -40,7 +40,7 @@ export async function getQueue(): Promise<PgBoss> {
       connectionString: process.env.DATABASE_URL!,
       retryLimit: 3,
       retryDelay: 5,
-      expireInHours: 24,
+      expireInHours: 23,  // pg-boss v10 max is < 24h
     });
     await boss.start();
   }
