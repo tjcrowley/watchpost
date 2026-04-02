@@ -184,6 +184,9 @@ async function startPipelineWorker(): Promise<void> {
 export async function startConnector(): Promise<void> {
   logger.info("WatchPost Worker starting...");
 
+  // Give postgres/pg-boss a moment to be fully ready
+  await new Promise((r) => setTimeout(r, 3000));
+
   await startPipelineWorker();
 
   connectWithBackoff().catch((err) => {
@@ -203,7 +206,7 @@ export async function startConnector(): Promise<void> {
   }
 }
 
-startConnector().catch((err) => {
-  logger.error(err, "Worker failed to start");
+startConnector().catch((err: unknown) => {
+  console.error("Worker failed to start:", err);
   process.exit(1);
 });
