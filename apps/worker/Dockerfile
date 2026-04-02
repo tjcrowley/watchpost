@@ -6,6 +6,9 @@ COPY .npmrc package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/ ./packages/
 COPY apps/worker/ ./apps/worker/
 RUN pnpm install --no-frozen-lockfile
+# Force worker to use root node_modules unifi-protect (v4), not its own v3
+RUN rm -rf /app/apps/worker/node_modules/unifi-protect && \
+    ln -s /app/node_modules/unifi-protect /app/apps/worker/node_modules/unifi-protect
 
 # Build workspace packages first so their dist/ is available
 RUN pnpm --filter @watchpost/types build

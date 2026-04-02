@@ -1,5 +1,4 @@
 import { ProtectApi, ProtectApiUpdates } from "unifi-protect";
-import type { ProtectNvrUpdatePayloadEventAdd } from "unifi-protect";
 import Redis from "ioredis";
 import { createLogger } from "@watchpost/logger";
 import { getPool, getQueue } from "@watchpost/db";
@@ -7,7 +6,7 @@ import { processEvent } from "../pipeline/processor.js";
 
 const logger = createLogger("protect-connector");
 
-// v4 API: login() takes the NVR hostname or IP (no scheme)
+// v4 API: login() takes hostname/IP (no scheme)
 const PROTECT_URL = (process.env.PROTECT_URL ?? "192.168.1.1")
   .replace(/^https?:\/\//, "")
   .replace(/\/$/, "");
@@ -22,16 +21,14 @@ let shutdownRequested = false;
 async function getSiteId(): Promise<string> {
   const pool = getPool();
   const result = await pool.query("SELECT id FROM sites LIMIT 1");
-  if (result.rows.length === 0) {
-    throw new Error("No site configured.");
-  }
+  if (result.rows.length === 0) throw new Error("No site configured.");
   return result.rows[0].id as string;
 }
 
 async function syncCameras(api: ProtectApi, siteId: string): Promise<void> {
-  const cameras = api.bootstrap?.cameras ?? [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cameras: any[] = (api.bootstrap as any)?.cameras ?? [];
   logger.info({ cameras: cameras.length }, "Syncing cameras");
-
   const pool = getPool();
   for (const cam of cameras) {
     await pool.query(
@@ -49,35 +46,25 @@ async function connect(): Promise<void> {
 
   protect = new ProtectApi();
 
-  // v4: login(url, username, password)
   const loginOk = await protect.login(PROTECT_URL, PROTECT_USERNAME, PROTECT_PASSWORD);
-  if (!loginOk) {
-    throw new Error("Failed to authenticate with UniFi Protect");
-  }
+  if (!loginOk) throw new Error("Failed to authenticate with UniFi Protect");
   logger.info("Authenticated with UniFi Protect");
 
-  // v4: bootstrapController() fetches devices
-  const bootstrapOk = await protect.bootstrapController();
-  if (!bootstrapOk) {
-    throw new Error("Failed to bootstrap Protect controller");
-  }
+  // v4: getBootstrap() is the public method to fetch device list
+  const bootstrapOk = await protect.getBootstrap();
+  if (!bootstrapOk) throw new Error("Failed to bootstrap Protect controller");
   logger.info("Bootstrap complete");
 
   redis = new Redis(REDIS_URL);
   const siteId = await getSiteId();
   await syncCameras(protect, siteId);
 
-  // v4: launchEventsWs() starts the events WebSocket
   const wsOk = await protect.launchEventsWs();
-  if (!wsOk) {
-    throw new Error("Failed to launch Protect events WebSocket");
-  }
+  if (!wsOk) throw new Error("Failed to launch Protect events WebSocket");
   logger.info("Events WebSocket started");
 
   const ws = protect.eventsWs;
-  if (!ws) {
-    throw new Error("eventsWs is null after launchEventsWs");
-  }
+  if (!ws) throw new Error("eventsWs is null after launchEventsWs");
 
   const pool = getPool();
   const queue = await getQueue();
@@ -87,10 +74,12 @@ async function connect(): Promise<void> {
       const packet = ProtectApiUpdates.decodeUpdatePacket(protect!.log, data);
       if (!packet) return;
 
-      const action = packet.action;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const action = packet.action as any;
       if (action.modelKey !== "event" || action.action !== "add") return;
 
-      const payload = packet.payload as ProtectNvrUpdatePayloadEventAdd;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const payload = packet.payload as any;
       if (!payload || payload.type !== "smartDetectZone") return;
 
       const smartTypes: string[] = payload.smartDetectTypes ?? [];
@@ -108,7 +97,6 @@ async function connect(): Promise<void> {
         return;
       }
 
-      // Fetch snapshot
       let snapshotBase64: string | null = null;
       try {
         const snap = await protect!.getSnapshot(payload.camera);
@@ -132,7 +120,6 @@ async function connect(): Promise<void> {
 
   logger.info("Subscribed to Protect events");
 
-  // Wait until WS closes
   await new Promise<void>((resolve) => {
     ws.on("close", () => { logger.warn("WebSocket disconnected"); resolve(); });
     ws.on("error", (err: Error) => { logger.error(err, "WebSocket error"); resolve(); });
@@ -190,8 +177,6 @@ async function startPipelineWorker(): Promise<void> {
 
 export async function startConnector(): Promise<void> {
   logger.info("WatchPost Worker starting...");
-
-  // Give postgres a moment to be fully ready
   await new Promise((r) => setTimeout(r, 3000));
 
   await startPipelineWorker();
