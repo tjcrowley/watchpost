@@ -3,7 +3,9 @@ import { query, queryOne } from "../db/client.js";
 import type { Camera, AuthUser } from "@watchpost/types";
 
 export const camerasRoutes: FastifyPluginAsync = async (app) => {
-  app.addHook("onRequest", app.authenticate);
+  app.addHook("onRequest", async (request) => {
+    await request.jwtVerify();
+  });
 
   // GET /api/cameras
   app.get("/", async (request, reply) => {

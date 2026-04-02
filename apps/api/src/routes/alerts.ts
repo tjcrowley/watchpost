@@ -3,7 +3,9 @@ import { query, queryOne } from "../db/client.js";
 import type { Alert, PaginatedResponse, AuthUser } from "@watchpost/types";
 
 export const alertsRoutes: FastifyPluginAsync = async (app) => {
-  app.addHook("onRequest", app.authenticate);
+  app.addHook("onRequest", async (request) => {
+    await request.jwtVerify();
+  });
 
   // GET /api/alerts
   app.get<{ Querystring: { page?: string; limit?: string; status?: string } }>(

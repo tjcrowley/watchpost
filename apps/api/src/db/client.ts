@@ -1,7 +1,7 @@
 import pg from "pg";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+
 
 const { Pool } = pg;
 
@@ -20,16 +20,16 @@ function getPool(): pg.Pool {
 }
 
 /** Execute a parameterised query and return rows. */
-export async function query<T extends Record<string, unknown> = Record<string, unknown>>(
+export async function query<T = Record<string, unknown>>(
   text: string,
   params?: unknown[],
 ): Promise<T[]> {
-  const result = await getPool().query<T>(text, params);
-  return result.rows;
+  const result = await getPool().query(text, params);
+  return result.rows as T[];
 }
 
 /** Execute a parameterised query and return the first row or null. */
-export async function queryOne<T extends Record<string, unknown> = Record<string, unknown>>(
+export async function queryOne<T = Record<string, unknown>>(
   text: string,
   params?: unknown[],
 ): Promise<T | null> {
@@ -43,7 +43,7 @@ export async function queryOne<T extends Record<string, unknown> = Record<string
  * Usage:
  *   const rows = await sql<User>`SELECT * FROM users WHERE id = ${userId}`;
  */
-export async function sql<T extends Record<string, unknown> = Record<string, unknown>>(
+export async function sql<T = Record<string, unknown>>(
   strings: TemplateStringsArray,
   ...values: unknown[]
 ): Promise<T[]> {
@@ -63,8 +63,7 @@ export async function sql<T extends Record<string, unknown> = Record<string, unk
  */
 export async function runMigrations(): Promise<void> {
   const migrationsDir = join(
-    fileURLToPath(import.meta.url),
-    "..",  // db/
+    __dirname,
     "..",  // src/
     "..",  // apps/api/
     "..",  // apps/

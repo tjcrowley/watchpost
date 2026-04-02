@@ -27,7 +27,7 @@ export const wsHub: FastifyPluginAsync = async (app) => {
       subscriber.punsubscribe("events:*").then(() => subscriber.quit());
     });
 
-    socket.on("error", (err) => {
+    socket.on("error", (err: Error) => {
       app.log.error(err, "WebSocket error");
       subscriber.punsubscribe("events:*").then(() => subscriber.quit());
     });
