@@ -1,4 +1,4 @@
-import { ProtectApi, ProtectApiUpdates } from "unifi-protect";
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import Redis from "ioredis";
 import { createLogger } from "@watchpost/logger";
 import { getPool, getQueue } from "@watchpost/db";
@@ -7,14 +7,13 @@ import { processEvent } from "../pipeline/processor.js";
 const logger = createLogger("protect-connector");
 
 // v4 API: login() takes hostname/IP (no scheme)
-const PROTECT_URL = (process.env.PROTECT_URL ?? "192.168.1.1")
+const PROTECT_HOST = (process.env.PROTECT_URL ?? "192.168.1.1")
   .replace(/^https?:\/\//, "")
   .replace(/\/$/, "");
 const PROTECT_USERNAME = process.env.PROTECT_USERNAME ?? "";
 const PROTECT_PASSWORD = process.env.PROTECT_PASSWORD ?? "";
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 
-let protect: ProtectApi | null = null;
 let redis: Redis | null = null;
 let shutdownRequested = false;
 
@@ -25,9 +24,8 @@ async function getSiteId(): Promise<string> {
   return result.rows[0].id as string;
 }
 
-async function syncCameras(api: ProtectApi, siteId: string): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const cameras: any[] = (api.bootstrap as any)?.cameras ?? [];
+async function syncCameras(api: any, siteId: string): Promise<void> {
+  const cameras: any[] = api.bootstrap?.cameras ?? [];
   logger.info({ cameras: cameras.length }, "Syncing cameras");
   const pool = getPool();
   for (const cam of cameras) {
@@ -42,15 +40,16 @@ async function syncCameras(api: ProtectApi, siteId: string): Promise<void> {
 }
 
 async function connect(): Promise<void> {
-  logger.info({ url: PROTECT_URL }, "Connecting to UniFi Protect...");
+  logger.info({ host: PROTECT_HOST }, "Connecting to UniFi Protect...");
 
-  protect = new ProtectApi();
+  // Dynamic import because unifi-protect v4 is ESM-only
+  const up = await import("unifi-protect");
+  const protect: any = new up.ProtectApi();
 
-  const loginOk = await protect.login(PROTECT_URL, PROTECT_USERNAME, PROTECT_PASSWORD);
+  const loginOk = await protect.login(PROTECT_HOST, PROTECT_USERNAME, PROTECT_PASSWORD);
   if (!loginOk) throw new Error("Failed to authenticate with UniFi Protect");
   logger.info("Authenticated with UniFi Protect");
 
-  // v4: getBootstrap() is the public method to fetch device list
   const bootstrapOk = await protect.getBootstrap();
   if (!bootstrapOk) throw new Error("Failed to bootstrap Protect controller");
   logger.info("Bootstrap complete");
@@ -59,26 +58,27 @@ async function connect(): Promise<void> {
   const siteId = await getSiteId();
   await syncCameras(protect, siteId);
 
+  // launchEventsWs is private in types but exists at runtime
   const wsOk = await protect.launchEventsWs();
   if (!wsOk) throw new Error("Failed to launch Protect events WebSocket");
   logger.info("Events WebSocket started");
 
-  const ws = protect.eventsWs;
-  if (!ws) throw new Error("eventsWs is null after launchEventsWs");
+  // _eventsWs is the internal WebSocket
+  const ws = protect._eventsWs;
+  if (!ws) throw new Error("_eventsWs is null after launchEventsWs");
 
   const pool = getPool();
   const queue = await getQueue();
 
   ws.on("message", async (data: Buffer) => {
     try {
-      const packet = ProtectApiUpdates.decodeUpdatePacket(protect!.log, data);
+      const { ProtectApiUpdates } = await import("unifi-protect");
+      const packet = ProtectApiUpdates.decodeUpdatePacket(protect.log, data);
       if (!packet) return;
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const action = packet.action as any;
       if (action.modelKey !== "event" || action.action !== "add") return;
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const payload = packet.payload as any;
       if (!payload || payload.type !== "smartDetectZone") return;
 
@@ -99,8 +99,8 @@ async function connect(): Promise<void> {
 
       let snapshotBase64: string | null = null;
       try {
-        const snap = await protect!.getSnapshot(payload.camera);
-        if (snap) snapshotBase64 = snap.toString("base64");
+        const snap = await protect.getSnapshot(payload.camera);
+        if (snap) snapshotBase64 = (snap as Buffer).toString("base64");
       } catch (err) {
         logger.warn(err, "Snapshot fetch failed");
       }
@@ -142,8 +142,6 @@ async function connectWithBackoff(): Promise<void> {
       const delay = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1), MAX_DELAY_MS);
       logger.error({ err, attempt, retryInMs: delay }, "Protect connection failed, retrying...");
       await new Promise((r) => setTimeout(r, delay));
-    } finally {
-      protect = null;
     }
   }
 }
@@ -151,7 +149,7 @@ async function connectWithBackoff(): Promise<void> {
 async function startPipelineWorker(): Promise<void> {
   const queue = await getQueue();
 
-  await queue.work("detection-pipeline", async (jobs) => {
+  await queue.work("detection-pipeline", async (jobs: any[]) => {
     for (const job of jobs) {
       const data = job.data as Record<string, unknown>;
       const { snapshot_base64, ...eventData } = data;
