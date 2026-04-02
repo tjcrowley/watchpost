@@ -1,5 +1,5 @@
-import { ProtectApi } from "unifi-protect";
-import { ProtectApiUpdates, type ProtectNvrUpdatePayloadEventAdd } from "unifi-protect";
+import { ProtectApi, ProtectApiUpdates } from "unifi-protect";
+import type { ProtectNvrUpdatePayloadEventAdd } from "unifi-protect";
 import Redis from "ioredis";
 import { createLogger } from "@watchpost/logger";
 import { getPool, getQueue } from "@watchpost/db";
@@ -7,10 +7,8 @@ import { processEvent } from "../pipeline/processor.js";
 
 const logger = createLogger("protect-connector");
 
-// ProtectApi v3 takes just the hostname/IP, not a full URL
-const PROTECT_URL = (process.env.PROTECT_URL ?? "192.168.1.1")
-  .replace(/^https?:\/\//, "")  // strip scheme if present
-  .replace(/\/$/, "");           // strip trailing slash
+// v4 API: login() takes full URL
+const PROTECT_URL = process.env.PROTECT_URL ?? "https://192.168.1.1";
 const PROTECT_USERNAME = process.env.PROTECT_USERNAME ?? "";
 const PROTECT_PASSWORD = process.env.PROTECT_PASSWORD ?? "";
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
@@ -23,14 +21,14 @@ async function getSiteId(): Promise<string> {
   const pool = getPool();
   const result = await pool.query("SELECT id FROM sites LIMIT 1");
   if (result.rows.length === 0) {
-    throw new Error("No site configured. Create a site first.");
+    throw new Error("No site configured.");
   }
   return result.rows[0].id as string;
 }
 
 async function syncCameras(api: ProtectApi, siteId: string): Promise<void> {
-  const cameras = api.cameras ?? [];
-  logger.info({ cameras: cameras.length }, "Protect bootstrap loaded");
+  const cameras = api.bootstrap?.cameras ?? [];
+  logger.info({ cameras: cameras.length }, "Syncing cameras");
 
   const pool = getPool();
   for (const cam of cameras) {
@@ -47,24 +45,36 @@ async function syncCameras(api: ProtectApi, siteId: string): Promise<void> {
 async function connect(): Promise<void> {
   logger.info({ url: PROTECT_URL }, "Connecting to UniFi Protect...");
 
-  // v3 API: constructor handles login
-  protect = new ProtectApi(PROTECT_URL, PROTECT_USERNAME, PROTECT_PASSWORD);
+  protect = new ProtectApi();
 
-  // Bootstrap / authenticate
-  const ok = await protect.refreshDevices();
-  if (!ok) {
+  // v4: login(url, username, password)
+  const loginOk = await protect.login(PROTECT_URL, PROTECT_USERNAME, PROTECT_PASSWORD);
+  if (!loginOk) {
     throw new Error("Failed to authenticate with UniFi Protect");
   }
   logger.info("Authenticated with UniFi Protect");
+
+  // v4: bootstrapController() fetches devices
+  const bootstrapOk = await protect.bootstrapController();
+  if (!bootstrapOk) {
+    throw new Error("Failed to bootstrap Protect controller");
+  }
+  logger.info("Bootstrap complete");
 
   redis = new Redis(REDIS_URL);
   const siteId = await getSiteId();
   await syncCameras(protect, siteId);
 
-  // Attach to the events WebSocket
+  // v4: launchEventsWs() starts the events WebSocket
+  const wsOk = await protect.launchEventsWs();
+  if (!wsOk) {
+    throw new Error("Failed to launch Protect events WebSocket");
+  }
+  logger.info("Events WebSocket started");
+
   const ws = protect.eventsWs;
   if (!ws) {
-    throw new Error("Protect events WebSocket not available after bootstrap");
+    throw new Error("eventsWs is null after launchEventsWs");
   }
 
   const pool = getPool();
@@ -84,12 +94,8 @@ async function connect(): Promise<void> {
       const smartTypes: string[] = payload.smartDetectTypes ?? [];
       if (!smartTypes.includes("person")) return;
 
-      logger.info(
-        { type: payload.type, camera: payload.camera, id: payload.id, smartTypes },
-        "Person detection event received"
-      );
+      logger.info({ type: payload.type, camera: payload.camera, id: payload.id }, "Person detection");
 
-      // Find the camera in our DB
       const camResult = await pool.query(
         "SELECT id FROM cameras WHERE protect_id = $1 AND site_id = $2",
         [payload.camera, siteId]
@@ -100,32 +106,34 @@ async function connect(): Promise<void> {
         return;
       }
 
-      // Enqueue for processing via pg-boss
+      // Fetch snapshot
+      let snapshotBase64: string | null = null;
+      try {
+        const snap = await protect!.getSnapshot(payload.camera);
+        if (snap) snapshotBase64 = snap.toString("base64");
+      } catch (err) {
+        logger.warn(err, "Snapshot fetch failed");
+      }
+
       await queue.send("detection-pipeline", {
         site_id: siteId,
         camera_id: camResult.rows[0].id,
         protect_event_id: payload.id,
         event_type: payload.type,
         detected_at: new Date(payload.start).toISOString(),
-        snapshot_base64: null, // v3 API snapshot fetch handled in processor
+        snapshot_base64: snapshotBase64,
       });
     } catch (err) {
       logger.error(err, "Error handling Protect event");
     }
   });
 
-  logger.info("Subscribed to Protect events WebSocket");
+  logger.info("Subscribed to Protect events");
 
-  // Wait until WS closes (disconnect)
+  // Wait until WS closes
   await new Promise<void>((resolve) => {
-    ws.on("close", () => {
-      logger.warn("Protect WebSocket disconnected");
-      resolve();
-    });
-    ws.on("error", (err: Error) => {
-      logger.error(err, "Protect WebSocket error");
-      resolve();
-    });
+    ws.on("close", () => { logger.warn("WebSocket disconnected"); resolve(); });
+    ws.on("error", (err: Error) => { logger.error(err, "WebSocket error"); resolve(); });
   });
 }
 
@@ -139,14 +147,11 @@ async function connectWithBackoff(): Promise<void> {
       await connect();
       attempt = 0;
       if (shutdownRequested) return;
-      logger.info("Reconnecting after disconnect...");
+      logger.info("Reconnecting...");
     } catch (err) {
       attempt++;
       const delay = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1), MAX_DELAY_MS);
-      logger.error(
-        { err, attempt, retryInMs: delay },
-        "Protect connection failed, retrying..."
-      );
+      logger.error({ err, attempt, retryInMs: delay }, "Protect connection failed, retrying...");
       await new Promise((r) => setTimeout(r, delay));
     } finally {
       protect = null;
@@ -184,17 +189,16 @@ async function startPipelineWorker(): Promise<void> {
 export async function startConnector(): Promise<void> {
   logger.info("WatchPost Worker starting...");
 
-  // Give postgres/pg-boss a moment to be fully ready
+  // Give postgres a moment to be fully ready
   await new Promise((r) => setTimeout(r, 3000));
 
   await startPipelineWorker();
 
-  connectWithBackoff().catch((err) => {
+  connectWithBackoff().catch((err: unknown) => {
     logger.error(err, "Fatal connector error");
     process.exit(1);
   });
 
-  // Graceful shutdown
   const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
   for (const signal of signals) {
     process.on(signal, async () => {
