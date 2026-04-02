@@ -1,81 +1,35 @@
 import { type FastifyPluginAsync } from "fastify";
-import { type WebSocket } from "ws";
 import Redis from "ioredis";
-import { createLogger } from "@watchpost/logger";
-import type { WsMessage } from "@watchpost/types";
 
-const logger = createLogger("ws-hub");
+const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 
-const clients = new Set<WebSocket>();
+export const wsHub: FastifyPluginAsync = async (app) => {
+  app.get("/events", { websocket: true }, (socket, _request) => {
+    const subscriber = new Redis(REDIS_URL);
 
-let subscriber: Redis | null = null;
-
-function getSubscriber(): Redis {
-  if (!subscriber) {
-    subscriber = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
-
-    subscriber.subscribe("watchpost:events", (err) => {
+    subscriber.psubscribe("events:*", (err) => {
       if (err) {
-        logger.error(err, "Failed to subscribe to Redis channel");
-      } else {
-        logger.info("Subscribed to watchpost:events");
+        app.log.error(err, "Failed to psubscribe to events:*");
+        socket.close();
+        return;
+      }
+      app.log.info("WS client subscribed to events:*");
+    });
+
+    subscriber.on("pmessage", (_pattern: string, channel: string, message: string) => {
+      if (socket.readyState === socket.OPEN) {
+        socket.send(JSON.stringify({ channel, data: JSON.parse(message) }));
       }
     });
 
-    subscriber.on("message", (_channel: string, message: string) => {
-      broadcast(message);
-    });
-  }
-  return subscriber;
-}
-
-function broadcast(message: string): void {
-  const dead: WebSocket[] = [];
-
-  for (const ws of clients) {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(message);
-    } else {
-      dead.push(ws);
-    }
-  }
-
-  for (const ws of dead) {
-    clients.delete(ws);
-  }
-}
-
-export const wsHub: FastifyPluginAsync = async (app) => {
-  // Ensure subscriber is initialized
-  getSubscriber();
-
-  app.get("/", { websocket: true }, (socket, request) => {
-    logger.info("WebSocket client connected");
-    clients.add(socket);
-
-    // Send welcome message
-    const welcome: WsMessage = {
-      type: "system",
-      payload: { message: "Connected to WatchPost" },
-      timestamp: new Date().toISOString(),
-    };
-    socket.send(JSON.stringify(welcome));
-
     socket.on("close", () => {
-      clients.delete(socket);
-      logger.info("WebSocket client disconnected");
+      app.log.info("WS client disconnected, cleaning up subscriber");
+      subscriber.punsubscribe("events:*").then(() => subscriber.quit());
     });
 
     socket.on("error", (err) => {
-      logger.error(err, "WebSocket error");
-      clients.delete(socket);
+      app.log.error(err, "WebSocket error");
+      subscriber.punsubscribe("events:*").then(() => subscriber.quit());
     });
   });
 };
-
-// Helper to publish events from other services
-export async function publishEvent(event: WsMessage): Promise<void> {
-  const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
-  await redis.publish("watchpost:events", JSON.stringify(event));
-  await redis.quit();
-}
