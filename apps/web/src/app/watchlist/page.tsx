@@ -1,9 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { apiFetch } from "@/src/lib/api";
+import { useEffect, useState, useRef, useCallback } from "react";
+import { apiFetch, getToken } from "@/src/lib/api";
 import { Nav } from "@/src/components/nav";
 import { cn } from "@/src/lib/utils";
+
+interface FaceEnrollment {
+  id: string;
+  source_path: string;
+  quality: number;
+  created_at: string;
+}
 
 interface Subject {
   id: string;
@@ -16,6 +23,10 @@ interface Subject {
   created_at: string;
 }
 
+interface SubjectDetail extends Subject {
+  face_enrollments: FaceEnrollment[];
+}
+
 const LIST_COLORS: Record<string, string> = {
   ban: "bg-destructive/20 text-destructive",
   watch: "bg-yellow-500/20 text-yellow-400",
@@ -26,17 +37,42 @@ const FILTERS = ["all", "ban", "watch", "vip"] as const;
 
 export default function WatchlistPage() {
   const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [enrollmentCounts, setEnrollmentCounts] = useState<Record<string, number>>({});
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [showModal, setShowModal] = useState(false);
+  const [showAddModal, setShowAddModal] = useState(false);
   const [form, setForm] = useState({ display_name: "", list_type: "ban", reason: "", notes: "", expires_at: "" });
   const [saving, setSaving] = useState(false);
+
+  // Enrollment modal state
+  const [enrollSubject, setEnrollSubject] = useState<Subject | null>(null);
+  const [enrollFile, setEnrollFile] = useState<File | null>(null);
+  const [enrollPreview, setEnrollPreview] = useState<string | null>(null);
+  const [enrolling, setEnrolling] = useState(false);
+  const [enrollMsg, setEnrollMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [enrollCount, setEnrollCount] = useState(0);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const loadEnrollmentCounts = useCallback(async (subs: Subject[]) => {
+    const counts: Record<string, number> = {};
+    const results = await Promise.allSettled(
+      subs.map((s) => apiFetch<SubjectDetail>(`/api/watchlist/${s.id}`))
+    );
+    results.forEach((r, i) => {
+      if (r.status === "fulfilled") {
+        counts[subs[i].id] = r.value.face_enrollments?.length ?? 0;
+      }
+    });
+    setEnrollmentCounts(counts);
+  }, []);
 
   async function load() {
     try {
       const data = await apiFetch<Subject[]>("/api/watchlist");
       setSubjects(data);
+      loadEnrollmentCounts(data);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -61,7 +97,7 @@ export default function WatchlistPage() {
           expires_at: form.expires_at || undefined,
         }),
       });
-      setShowModal(false);
+      setShowAddModal(false);
       setForm({ display_name: "", list_type: "ban", reason: "", notes: "", expires_at: "" });
       load();
     } catch (e) {
@@ -79,6 +115,72 @@ export default function WatchlistPage() {
     load();
   }
 
+  function openEnrollModal(s: Subject) {
+    setEnrollSubject(s);
+    setEnrollFile(null);
+    setEnrollPreview(null);
+    setEnrolling(false);
+    setEnrollMsg(null);
+    setEnrollCount(enrollmentCounts[s.id] ?? 0);
+  }
+
+  function handleFile(file: File | null) {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setEnrollMsg({ type: "error", text: "Please select an image file" });
+      return;
+    }
+    setEnrollFile(file);
+    setEnrollMsg(null);
+    const reader = new FileReader();
+    reader.onload = (e) => setEnrollPreview(e.target?.result as string);
+    reader.readAsDataURL(file);
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    handleFile(file);
+  }
+
+  async function submitEnrollment() {
+    if (!enrollSubject || !enrollFile) return;
+    setEnrolling(true);
+    setEnrollMsg(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("photo", enrollFile);
+      const token = getToken();
+
+      const res = await fetch(`/api/watchlist/${enrollSubject.id}/enroll`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      setEnrollMsg({ type: "success", text: `Face enrolled successfully (quality: ${(data.quality * 100).toFixed(0)}%)` });
+      setEnrollFile(null);
+      setEnrollPreview(null);
+      setEnrollCount((c) => c + 1);
+      setEnrollmentCounts((prev) => ({
+        ...prev,
+        [enrollSubject.id]: (prev[enrollSubject.id] ?? 0) + 1,
+      }));
+    } catch (e) {
+      setEnrollMsg({ type: "error", text: (e as Error).message });
+    } finally {
+      setEnrolling(false);
+    }
+  }
+
   return (
     <div className="min-h-screen">
       <Nav />
@@ -86,7 +188,7 @@ export default function WatchlistPage() {
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-2xl font-bold">Watchlist</h1>
           <button
-            onClick={() => setShowModal(true)}
+            onClick={() => setShowAddModal(true)}
             className="bg-primary text-primary-foreground px-4 py-2 rounded-md text-sm font-medium hover:opacity-90"
           >
             + Add Subject
@@ -118,14 +220,14 @@ export default function WatchlistPage() {
             <table className="w-full text-sm">
               <thead className="bg-muted/30">
                 <tr>
-                  {["Name", "Type", "Reason", "Added", "Status", "Actions"].map((h) => (
+                  {["Name", "Type", "Faces", "Reason", "Added", "Status", "Actions"].map((h) => (
                     <th key={h} className="text-left px-4 py-3 text-muted-foreground font-medium">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 && (
-                  <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">No subjects</td></tr>
+                  <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">No subjects</td></tr>
                 )}
                 {filtered.map((s) => (
                   <tr key={s.id} className="border-t border-border hover:bg-accent/30">
@@ -133,6 +235,16 @@ export default function WatchlistPage() {
                     <td className="px-4 py-3">
                       <span className={cn("px-2 py-0.5 rounded text-xs font-medium capitalize", LIST_COLORS[s.list_type])}>
                         {s.list_type}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={cn(
+                        "text-xs px-2 py-0.5 rounded font-mono",
+                        (enrollmentCounts[s.id] ?? 0) > 0
+                          ? "bg-primary/10 text-primary"
+                          : "bg-muted text-muted-foreground"
+                      )}>
+                        {enrollmentCounts[s.id] ?? 0}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-muted-foreground">{s.reason ?? "—"}</td>
@@ -145,12 +257,20 @@ export default function WatchlistPage() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <button
-                        onClick={() => toggleActive(s)}
-                        className="text-xs text-muted-foreground hover:text-foreground underline"
-                      >
-                        {s.active ? "Deactivate" : "Activate"}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => openEnrollModal(s)}
+                          className="text-xs px-2 py-1 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                        >
+                          Enroll Face
+                        </button>
+                        <button
+                          onClick={() => toggleActive(s)}
+                          className="text-xs text-muted-foreground hover:text-foreground underline"
+                        >
+                          {s.active ? "Deactivate" : "Activate"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -161,7 +281,7 @@ export default function WatchlistPage() {
       </div>
 
       {/* Add Subject Modal */}
-      {showModal && (
+      {showAddModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
           <div className="bg-card border border-border rounded-lg p-6 w-full max-w-md">
             <h2 className="text-lg font-semibold mb-4">Add Subject</h2>
@@ -197,7 +317,7 @@ export default function WatchlistPage() {
             </div>
             <div className="flex gap-3 mt-5">
               <button
-                onClick={() => setShowModal(false)}
+                onClick={() => setShowAddModal(false)}
                 className="flex-1 border border-border rounded-md py-2 text-sm hover:bg-accent"
               >
                 Cancel
@@ -208,6 +328,107 @@ export default function WatchlistPage() {
                 className="flex-1 bg-primary text-primary-foreground rounded-md py-2 text-sm font-medium hover:opacity-90 disabled:opacity-50"
               >
                 {saving ? "Saving..." : "Add"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Enroll Face Modal */}
+      {enrollSubject && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-card border border-border rounded-lg p-6 w-full max-w-md">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-semibold">Enroll Face</h2>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  {enrollSubject.display_name}
+                  <span className={cn("ml-2 px-2 py-0.5 rounded text-xs font-medium capitalize", LIST_COLORS[enrollSubject.list_type])}>
+                    {enrollSubject.list_type}
+                  </span>
+                </p>
+              </div>
+              <span className="text-xs px-2 py-1 rounded bg-muted text-muted-foreground">
+                {enrollCount} face{enrollCount !== 1 ? "s" : ""} enrolled
+              </span>
+            </div>
+
+            {/* Drag and drop zone */}
+            <div
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+              className={cn(
+                "border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors",
+                dragOver
+                  ? "border-primary bg-primary/5"
+                  : "border-border hover:border-muted-foreground"
+              )}
+            >
+              {enrollPreview ? (
+                <div className="space-y-3">
+                  <img
+                    src={enrollPreview}
+                    alt="Preview"
+                    className="max-h-48 mx-auto rounded-md border border-border"
+                  />
+                  <p className="text-xs text-muted-foreground">{enrollFile?.name}</p>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEnrollFile(null);
+                      setEnrollPreview(null);
+                    }}
+                    className="text-xs text-destructive hover:underline"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <p className="text-3xl mb-2 opacity-40">📸</p>
+                  <p className="text-sm text-muted-foreground">
+                    Drag and drop a photo here, or click to browse
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">JPG, PNG supported</p>
+                </>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
+              />
+            </div>
+
+            {/* Feedback */}
+            {enrollMsg && (
+              <div className={cn(
+                "text-sm mt-3 px-3 py-2 rounded",
+                enrollMsg.type === "success"
+                  ? "bg-green-500/10 text-green-400"
+                  : "bg-destructive/10 text-destructive"
+              )}>
+                {enrollMsg.text}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex gap-3 mt-5">
+              <button
+                onClick={() => setEnrollSubject(null)}
+                className="flex-1 border border-border rounded-md py-2 text-sm hover:bg-accent"
+              >
+                Close
+              </button>
+              <button
+                onClick={submitEnrollment}
+                disabled={enrolling || !enrollFile}
+                className="flex-1 bg-primary text-primary-foreground rounded-md py-2 text-sm font-medium hover:opacity-90 disabled:opacity-50"
+              >
+                {enrolling ? "Enrolling..." : "Enroll"}
               </button>
             </div>
           </div>

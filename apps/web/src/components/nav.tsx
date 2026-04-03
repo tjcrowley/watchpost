@@ -5,6 +5,7 @@ import { clearAuth } from "@/src/lib/api";
 import { cn } from "@/src/lib/utils";
 
 const links = [
+  { href: "/", label: "Dashboard", icon: "📊" },
   { href: "/watchlist", label: "Watchlist", icon: "📋" },
   { href: "/events", label: "Events", icon: "🎯" },
   { href: "/cameras", label: "Cameras", icon: "📷" },
